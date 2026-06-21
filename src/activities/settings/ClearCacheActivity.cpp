@@ -76,8 +76,8 @@ void ClearCacheActivity::render(RenderLock&&) {
 void ClearCacheActivity::clearCache() {
   LOG_DBG("CLEAR_CACHE", "Clearing cache...");
 
-  // Open .crosspoint directory
-  auto root = Storage.open("/.crosspoint");
+  // Open .radioink directory
+  auto root = Storage.open("/.radioink");
   if (!root || !root.isDirectory()) {
     LOG_DBG("CLEAR_CACHE", "Failed to open cache directory");
     if (root) root.close();
@@ -97,7 +97,7 @@ void ClearCacheActivity::clearCache() {
 
     // Only delete directories matching known book cache names.
     if (file.isDirectory() && isBookCacheDirectoryName(itemName.c_str())) {
-      String fullPath = "/.crosspoint/" + itemName;
+      String fullPath = "/.radioink/" + itemName;
       LOG_DBG("CLEAR_CACHE", "Removing cache: %s", fullPath.c_str());
 
       file.close();  // Close before attempting to delete

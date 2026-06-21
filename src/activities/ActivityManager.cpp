@@ -13,11 +13,12 @@
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
-#include "network/CrossPointWebServerActivity.h"
+#include "network/RadioInkWebServerActivity.h"
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
 #include "util/FullScreenMessageActivity.h"
+#include "util/RadioAuditActivity.h"
 
 void ActivityManager::begin() {
   xTaskCreate(&renderTaskTrampoline, "ActivityManagerRender",
@@ -170,7 +171,7 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
 }
 
 void ActivityManager::goToFileTransfer() {
-  replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
+  replaceActivity(std::make_unique<RadioInkWebServerActivity>(renderer, mappedInput));
 }
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
@@ -191,6 +192,10 @@ void ActivityManager::goToBrowser() {
   } else {
     replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
   }
+}
+
+void ActivityManager::goToRadioAudit() {
+  replaceActivity(std::make_unique<RadioAuditActivity>(renderer, mappedInput));
 }
 
 void ActivityManager::goToReader(std::string path) {
@@ -217,8 +222,10 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
       initialMenuItem = HomeMenuItem::RECENTS;
     } else if (activityName == "OpdsBookBrowser") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
-    } else if (activityName == "CrossPointWebServer") {
+    } else if (activityName == "RadioInkWebServer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
+    } else if (activityName == "RadioInk" || activityName == "RadioAudit") {
+      initialMenuItem = HomeMenuItem::RADIO_AUDIT;
     } else if (activityName == "Settings") {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
     }

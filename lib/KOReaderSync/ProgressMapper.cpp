@@ -704,7 +704,7 @@ bool streamSpine(const std::shared_ptr<Epub>& epub, int spineIndex, ParagraphStr
 }  // namespace
 
 SavedProgressPosition ProgressMapper::toSavedProgress(const std::shared_ptr<Epub>& epub,
-                                                      const CrossPointPosition& pos) {
+                                                      const RadioInkPosition& pos) {
   SavedProgressPosition result;
   float intra =
       (pos.totalPages > 1) ? static_cast<float>(pos.pageNumber) / static_cast<float>(pos.totalPages - 1) : 0.0f;
@@ -723,10 +723,10 @@ SavedProgressPosition ProgressMapper::toSavedProgress(const std::shared_ptr<Epub
   return result;
 }
 
-CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& koPos,
+RadioInkPosition ProgressMapper::toRadioInk(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& koPos,
                                                 GfxRenderer& renderer, int currentSpineIndex,
                                                 int totalPagesInCurrentSpine, int fallbackTotalPages) {
-  CrossPointPosition result{};
+  RadioInkPosition result{};
   const size_t bookSize = epub->getBookSize();
   if (bookSize == 0) return result;
 

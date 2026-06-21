@@ -1,9 +1,9 @@
 """
 PlatformIO pre-build script: inject git branch and short SHA into
-CROSSPOINT_VERSION for the default (dev) environment.
+RADIOINK_VERSION for the default (dev) environment.
 
 Results in a version string like:  1.1.0-dev-feat-kosync-xpath-05c6cf8
-Release environments are unaffected; they set CROSSPOINT_VERSION in the ini.
+Release environments are unaffected; they set RADIOINK_VERSION in the ini.
 """
 
 import configparser
@@ -70,10 +70,10 @@ def get_base_version(project_dir):
         return '0.0.0'
     config = configparser.ConfigParser()
     config.read(ini_path)
-    if not config.has_option('crosspoint', 'version'):
-        warn('No [crosspoint] version in platformio.ini; base version will be "0.0.0"')
+    if not config.has_option('radioink', 'version'):
+        warn('No [radioink] version in platformio.ini; base version will be "0.0.0"')
         return '0.0.0'
-    return config.get('crosspoint', 'version')
+    return config.get('radioink', 'version')
 
 
 def inject_version(env):
@@ -88,8 +88,8 @@ def inject_version(env):
     short_sha = get_git_short_sha(project_dir)
     version_string = f'{base_version}-dev-{branch}-{short_sha}'
 
-    env.Append(CPPDEFINES=[('CROSSPOINT_VERSION', f'\\"{version_string}\\"')])
-    print(f'CrossPoint build version: {version_string}')
+    env.Append(CPPDEFINES=[('RADIOINK_VERSION', f'\\"{version_string}\\"')])
+    print(f'RadioInk build version: {version_string}')
 
 
 # PlatformIO/SCons entry point — Import and env are SCons builtins injected at runtime.

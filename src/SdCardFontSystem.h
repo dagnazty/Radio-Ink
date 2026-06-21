@@ -23,7 +23,7 @@ class SdCardFontSystem {
   void ensureLoaded(GfxRenderer& renderer);
 
   /// Resolve an SD card font ID from family name + fontSize enum.
-  /// Returns 0 if not found. Used by CrossPointSettings::getReaderFontId().
+  /// Returns 0 if not found. Used by RadioInkSettings::getReaderFontId().
   int resolveFontId(const char* familyName, uint8_t fontSizeEnum) const;
 
   /// Access the registry (e.g. for settings UI to enumerate available fonts).

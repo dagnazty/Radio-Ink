@@ -1,6 +1,7 @@
 #include "RoundedRaffTheme.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <I18n.h>
 
@@ -57,12 +58,14 @@ void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const 
   const int titleX = rect.x + sidePadding;
   const int titleY = rect.y + 14;
 
+  // Battery + clock follow the device-wide Status Bar settings.
+  const bool showBattery = SETTINGS.statusBarBattery;
   const bool showBatteryPercentage =
-      SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
+      showBattery && SETTINGS.hideBatteryPercentage != RadioInkSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
   const int batteryIconX = rect.x + rect.width - sidePadding - RoundedRaffMetrics::values.batteryWidth;
 
   // Reserve space for the widest possible percentage text to avoid title/battery overlap
-  int batteryGroupLeftX = batteryIconX;
+  int batteryGroupLeftX = showBattery ? batteryIconX : (rect.x + rect.width - sidePadding);
   if (showBatteryPercentage) {
     // Clear a fixed-width area for the battery percentage to avoid ghosting when digit count changes (e.g. 100% -> 99%)
     const int maxTextWidth = renderer.getTextWidth(SMALL_FONT_ID, "100%");
@@ -73,13 +76,25 @@ void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const 
     renderer.fillRect(batteryIconX - maxTextWidth - batteryPercentSpacing, rect.y + 14, clearW, clearH, false);
   }
 
+  // Clock left of the battery group.
+  if (SETTINGS.statusBarClock && halClock.isAvailable()) {
+    char timeBuf[10];
+    if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
+      const int clockWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+      batteryGroupLeftX -= clockWidth + 12;
+      renderer.drawText(SMALL_FONT_ID, batteryGroupLeftX, titleY, timeBuf);
+    }
+  }
+
   const int maxTitleWidth = std::max(0, batteryGroupLeftX - 20 - titleX);
   auto headerTitle = renderer.truncatedText(kTitleFontId, title, maxTitleWidth, EpdFontFamily::BOLD);
   renderer.drawText(kTitleFontId, titleX, titleY, headerTitle.c_str(), true, EpdFontFamily::BOLD);
-  drawBatteryRight(renderer,
-                   Rect{batteryIconX, rect.y + 14, RoundedRaffMetrics::values.batteryWidth,
-                        RoundedRaffMetrics::values.batteryHeight},
-                   showBatteryPercentage);
+  if (showBattery) {
+    drawBatteryRight(renderer,
+                     Rect{batteryIconX, rect.y + 14, RoundedRaffMetrics::values.batteryWidth,
+                          RoundedRaffMetrics::values.batteryHeight},
+                     showBatteryPercentage);
+  }
 }
 
 void RoundedRaffTheme::drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,

@@ -204,22 +204,43 @@ void HalGPIO::begin() {
 
 void HalGPIO::update() {
   inputMgr.update();
+  // Advance any synthetic tap one phase per frame: press -> release -> idle.
+  if (injectPhase_ == 1) {
+    injectPhase_ = 2;
+  } else if (injectPhase_ == 2) {
+    injectPhase_ = 0;
+    injectButton_ = -1;
+  }
+  // Start a queued tap once the previous one has fully drained.
+  if (injectPhase_ == 0 && pendingInject_ >= 0) {
+    injectButton_ = pendingInject_;
+    pendingInject_ = -1;
+    injectPhase_ = 1;
+  }
   const bool connected = isUsbConnected();
   usbStateChanged = (connected != lastUsbConnected);
   lastUsbConnected = connected;
 }
 
+void HalGPIO::injectTap(uint8_t buttonIndex) { pendingInject_ = static_cast<int8_t>(buttonIndex); }
+
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
-bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
+bool HalGPIO::isPressed(uint8_t buttonIndex) const {
+  return inputMgr.isPressed(buttonIndex) || (injectButton_ == static_cast<int8_t>(buttonIndex) && injectPhase_ != 0);
+}
 
-bool HalGPIO::wasPressed(uint8_t buttonIndex) const { return inputMgr.wasPressed(buttonIndex); }
+bool HalGPIO::wasPressed(uint8_t buttonIndex) const {
+  return inputMgr.wasPressed(buttonIndex) || (injectButton_ == static_cast<int8_t>(buttonIndex) && injectPhase_ == 1);
+}
 
-bool HalGPIO::wasAnyPressed() const { return inputMgr.wasAnyPressed(); }
+bool HalGPIO::wasAnyPressed() const { return inputMgr.wasAnyPressed() || injectPhase_ == 1; }
 
-bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleased(buttonIndex); }
+bool HalGPIO::wasReleased(uint8_t buttonIndex) const {
+  return inputMgr.wasReleased(buttonIndex) || (injectButton_ == static_cast<int8_t>(buttonIndex) && injectPhase_ == 2);
+}
 
-bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
+bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased() || injectPhase_ == 2; }
 
 unsigned long HalGPIO::getHeldTime() const { return inputMgr.getHeldTime(); }
 

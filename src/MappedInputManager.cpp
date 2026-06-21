@@ -2,7 +2,7 @@
 
 #include <GfxRenderer.h>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 
 bool MappedInputManager::isNavDirectionSwapped() const {
   // Key the swap on the orientation the screen is *actually* rendered at, not the persisted reader
@@ -41,22 +41,22 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
     case Button::PageBack:
       // Reader page navigation uses side buttons and can be swapped via settings.
       switch (sideLayout) {
-        case CrossPointSettings::PREV_NEXT:
+        case RadioInkSettings::PREV_NEXT:
           return (gpio.*fn)(HalGPIO::BTN_UP);
-        case CrossPointSettings::NEXT_PREV:
+        case RadioInkSettings::NEXT_PREV:
           return (gpio.*fn)(HalGPIO::BTN_DOWN);
-        case CrossPointSettings::SIDE_BUTTONS_DISABLED:
+        case RadioInkSettings::SIDE_BUTTONS_DISABLED:
         default:
           return false;
       }
     case Button::PageForward:
       // Reader page navigation uses side buttons and can be swapped via settings.
       switch (sideLayout) {
-        case CrossPointSettings::PREV_NEXT:
+        case RadioInkSettings::PREV_NEXT:
           return (gpio.*fn)(HalGPIO::BTN_DOWN);
-        case CrossPointSettings::NEXT_PREV:
+        case RadioInkSettings::NEXT_PREV:
           return (gpio.*fn)(HalGPIO::BTN_UP);
-        case CrossPointSettings::SIDE_BUTTONS_DISABLED:
+        case RadioInkSettings::SIDE_BUTTONS_DISABLED:
         default:
           return false;
       }

@@ -23,3 +23,7 @@ lib/EpdFont/scripts/output/
 # (worktrees, scheduled-task locks, settings.local, scout CLEANUP.md) out.
 .claude/*
 !.claude/skills/
+
+# Firmware images and legacy patch artifacts (build outputs)
+*-firmware.bin
+crosspoint-radio-*.patch

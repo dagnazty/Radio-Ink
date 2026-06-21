@@ -39,12 +39,17 @@
 #define QMI8658_WHO_AM_I_VALUE 0x05  // WHO_AM_I expected value
 
 class HalGPIO {
-#if CROSSPOINT_EMULATED == 0
+#if RADIOINK_EMULATED == 0
   InputManager inputMgr;
 #endif
 
   bool lastUsbConnected = false;
   bool usbStateChanged = false;
+
+  // Synthetic button tap injected over serial (dev tool). 0=idle, 1=press frame, 2=release frame.
+  int8_t injectButton_ = -1;
+  uint8_t injectPhase_ = 0;
+  int8_t pendingInject_ = -1;
 
  public:
   enum class DeviceType : uint8_t { X4, X3 };
@@ -69,6 +74,8 @@ class HalGPIO {
   bool wasAnyPressed() const;
   bool wasReleased(uint8_t buttonIndex) const;
   bool wasAnyReleased() const;
+  // Inject a synthetic press+release of a physical button (serial dev tool).
+  void injectTap(uint8_t buttonIndex);
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
 

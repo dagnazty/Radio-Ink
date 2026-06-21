@@ -8,7 +8,7 @@
 
 #include <cstdio>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"

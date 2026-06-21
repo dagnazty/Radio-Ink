@@ -4,18 +4,18 @@
 #include <cstdint>
 #include <iosfwd>
 
-class CrossPointSettings {
+class RadioInkSettings {
  private:
   // Private constructor for singleton
-  CrossPointSettings() = default;
+  RadioInkSettings() = default;
 
   // Static instance
-  static CrossPointSettings instance;
+  static RadioInkSettings instance;
 
  public:
   // Delete copy constructor and assignment
-  CrossPointSettings(const CrossPointSettings&) = delete;
-  CrossPointSettings& operator=(const CrossPointSettings&) = delete;
+  RadioInkSettings(const RadioInkSettings&) = delete;
+  RadioInkSettings& operator=(const RadioInkSettings&) = delete;
 
   enum SLEEP_SCREEN_MODE {
     DARK = 0,
@@ -159,7 +159,7 @@ class CrossPointSettings {
   };
 
   // UI Theme
-  enum UI_THEME { CLASSIC = 0, LYRA = 1, LYRA_3_COVERS = 2, ROUNDEDRAFF = 3 };
+  enum UI_THEME { CLASSIC = 0, LYRA = 1, LYRA_3_COVERS = 2, ROUNDEDRAFF = 3, RADIO_INK = 4 };
 
   // Image rendering in EPUB reader
   enum IMAGE_RENDERING { IMAGES_DISPLAY = 0, IMAGES_PLACEHOLDER = 1, IMAGES_SUPPRESS = 2, IMAGE_RENDERING_COUNT };
@@ -187,8 +187,8 @@ class CrossPointSettings {
   uint8_t statusBarTitle = CHAPTER_TITLE;
   uint8_t statusBarBattery = 1;
   uint8_t xtcStatusBarMode = XTC_STATUS_BAR_HIDE;
-  // Clock display in status bar (X3 only, requires DS3231 RTC)
-  uint8_t statusBarClock = 0;
+  // Clock display in the device header / status bar (X3 only, requires DS3231 RTC)
+  uint8_t statusBarClock = 1;
   // Clock UTC offset in quarter-hour steps, biased by 48 so it fits in uint8_t.
   // Value 48 = UTC+0, 0 = UTC-12:00, 104 = UTC+14:00.
   // Quarter-hour granularity supports oddball zones like Nepal (+5:45) and Chatham (+12:45).
@@ -241,7 +241,7 @@ class CrossPointSettings {
   // Defaults to Bookmark to preserve the upstream long-press-Confirm-adds-bookmark behavior.
   uint8_t longPressMenuFunction = LP_MENU_BOOKMARK;
   // UI Theme
-  uint8_t uiTheme = LYRA;
+  uint8_t uiTheme = RADIO_INK;
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
   // Power button return from footnotes (1 = enabled, 0 = disabled)
@@ -267,10 +267,10 @@ class CrossPointSettings {
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
 
-  ~CrossPointSettings() = default;
+  ~RadioInkSettings() = default;
 
   // Get singleton instance
-  static CrossPointSettings& getInstance() { return instance; }
+  static RadioInkSettings& getInstance() { return instance; }
 
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
@@ -283,7 +283,7 @@ class CrossPointSettings {
   void* sdFontResolverCtx = nullptr;
 
   uint16_t getPowerButtonDuration() const {
-    return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
+    return (shortPwrBtn == RadioInkSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
   }
   int getReaderFontId() const;
 
@@ -293,7 +293,7 @@ class CrossPointSettings {
   bool saveToFile() const;
   bool loadFromFile();
 
-  static void validateFrontButtonMapping(CrossPointSettings& settings);
+  static void validateFrontButtonMapping(RadioInkSettings& settings);
   static uint8_t sleepTimeoutEnumToMinutes(uint8_t legacyValue);
 
  private:
@@ -307,4 +307,4 @@ class CrossPointSettings {
 };
 
 // Helper macro to access settings
-#define SETTINGS CrossPointSettings::getInstance()
+#define SETTINGS RadioInkSettings::getInstance()

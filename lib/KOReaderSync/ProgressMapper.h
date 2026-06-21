@@ -6,9 +6,9 @@
 #include <string>
 
 /**
- * CrossPoint position representation.
+ * RadioInk position representation.
  */
-struct CrossPointPosition {
+struct RadioInkPosition {
   int spineIndex;                  // Current spine item (chapter) index
   int pageNumber;                  // Current page within the spine item
   int totalPages;                  // Total pages in the current spine item
@@ -28,28 +28,28 @@ struct SavedProgressPosition {
 };
 
 /**
- * Maps between CrossPoint and SavedProgress position formats, such as those used by KOReader.
+ * Maps between RadioInk and SavedProgress position formats, such as those used by KOReader.
  *
- * CrossPoint tracks position as (spineIndex, pageNumber).
+ * RadioInk tracks position as (spineIndex, pageNumber).
  * SavedProgress uses XPath-like strings + percentage.
  *
- * Since CrossPoint discards HTML structure during parsing, we generate
+ * Since RadioInk discards HTML structure during parsing, we generate
  * synthetic XPath strings based on spine index, using percentage as the
  * primary sync mechanism.
  */
 class ProgressMapper {
  public:
   /**
-   * Convert CrossPoint position to SavedProgress format.
+   * Convert RadioInk position to SavedProgress format.
    *
    * @param epub The EPUB book
-   * @param pos CrossPoint position
+   * @param pos RadioInk position
    * @return SavedProgress position
    */
-  static SavedProgressPosition toSavedProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& pos);
+  static SavedProgressPosition toSavedProgress(const std::shared_ptr<Epub>& epub, const RadioInkPosition& pos);
 
   /**
-   * Convert SavedProgress position to CrossPoint format.
+   * Convert SavedProgress position to RadioInk format.
    *
    * Note: The returned pageNumber may be approximate since different
    * rendering settings produce different page counts.
@@ -59,9 +59,9 @@ class ProgressMapper {
    * @param renderer GfxRenderer for page count estimation
    * @param currentSpineIndex Index of the currently open spine item (for density estimation)
    * @param totalPagesInCurrentSpine Total pages in the current spine item (for density estimation)
-   * @return CrossPoint position
+   * @return RadioInk position
    */
-  static CrossPointPosition toCrossPoint(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& savedPos,
+  static RadioInkPosition toRadioInk(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& savedPos,
                                          GfxRenderer& renderer, int currentSpineIndex = -1,
                                          int totalPagesInCurrentSpine = 0, int fallbackTotalPages = 0);
 

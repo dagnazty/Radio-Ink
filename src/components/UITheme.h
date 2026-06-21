@@ -5,7 +5,7 @@
 #include <functional>
 #include <memory>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 #include "components/themes/BaseTheme.h"
 
 class UITheme {
@@ -23,7 +23,7 @@ class UITheme {
   static void drawCenteredText(const GfxRenderer& renderer, Rect screen, int fontId, int y, const char* text,
                                bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   void reload();
-  void setTheme(CrossPointSettings::UI_THEME type);
+  void setTheme(RadioInkSettings::UI_THEME type);
   static int getNumberOfItemsPerPage(const GfxRenderer& renderer, bool hasHeader, bool hasTabBar, bool hasButtonHints,
                                      bool hasSubtitle, int extraReservedHeight = 0);
   static std::string getCoverThumbPath(std::string coverBmpPath, int coverHeight);
@@ -31,9 +31,19 @@ class UITheme {
   static int getStatusBarHeight();
   static int getProgressBarHeight();
 
+  // Brand-logo opt-out for the Radio Ink theme: a page calls this before its
+  // drawButtonHints to skip the logo for that one render (data/log views).
+  void suppressBrandLogoOnce() { brandLogoSuppressed_ = true; }
+  bool consumeBrandLogoSuppressed() {
+    const bool suppressed = brandLogoSuppressed_;
+    brandLogoSuppressed_ = false;
+    return suppressed;
+  }
+
  private:
   const ThemeMetrics* currentMetrics;
   std::unique_ptr<BaseTheme> currentTheme;
+  bool brandLogoSuppressed_ = false;
 };
 
 // Helper macro to access current theme

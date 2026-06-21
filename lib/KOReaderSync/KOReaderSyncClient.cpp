@@ -12,8 +12,8 @@
 int KOReaderSyncClient::lastHttpCode = 0;
 
 namespace {
-// Device identifier for CrossPoint reader
-constexpr char DEVICE_NAME[] = "CrossPoint";
+// Device identifier for RadioInk reader
+constexpr char DEVICE_NAME[] = "RadioInk";
 constexpr char DEVICE_ID[] = "crosspoint-reader";
 
 // Small TLS buffers to fit in ESP32-C3's limited heap (~46KB free after WiFi).

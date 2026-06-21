@@ -8,7 +8,7 @@
 
 #include <algorithm>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -165,7 +165,7 @@ void BmpViewerActivity::doSetSleepCover() {
   }
 
   if (success) {
-    SETTINGS.sleepScreen = CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM;
+    SETTINGS.sleepScreen = RadioInkSettings::SLEEP_SCREEN_MODE::CUSTOM;
     SETTINGS.saveToFile();
     GUI.drawPopup(renderer, tr(STR_DONE));
   } else {

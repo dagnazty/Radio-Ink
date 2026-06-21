@@ -51,7 +51,7 @@ class OpdsServerStore {
   bool hasServers() const { return !servers.empty(); }
 
   /**
-   * Migrate from legacy single-server settings in CrossPointSettings.
+   * Migrate from legacy single-server settings in RadioInkSettings.
    * Called once during first load if no opds.json exists.
    */
   bool migrateFromSettings();

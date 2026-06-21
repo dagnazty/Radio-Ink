@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 #include "MappedInputManager.h"
 #include "SdCardFontSystem.h"
 #include "components/UITheme.h"
@@ -22,12 +22,12 @@ int findCurrentFontIndex(const SdCardFontRegistry* registry, const char* sdFontF
     const auto& families = registry->getFamilies();
     for (int i = 0; i < static_cast<int>(families.size()); i++) {
       if (families[i].name == sdFontFamilyName) {
-        return CrossPointSettings::BUILTIN_FONT_COUNT + i;
+        return RadioInkSettings::BUILTIN_FONT_COUNT + i;
       }
     }
   }
 
-  return fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? fontFamily : 0;
+  return fontFamily < RadioInkSettings::BUILTIN_FONT_COUNT ? fontFamily : 0;
 }
 }  // namespace
 
@@ -50,15 +50,15 @@ void FontSelectionActivity::onEnter() {
   originalSdFontFamilyName_[sizeof(originalSdFontFamilyName_) - 1] = '\0';
 
   fonts_.clear();
-  fonts_.reserve(CrossPointSettings::BUILTIN_FONT_COUNT + (registry_ ? registry_->getFamilyCount() : 0));
+  fonts_.reserve(RadioInkSettings::BUILTIN_FONT_COUNT + (registry_ ? registry_->getFamilyCount() : 0));
 
-  fonts_.push_back({I18N.get(StrId::STR_NOTO_SERIF), true, static_cast<uint8_t>(CrossPointSettings::NOTOSERIF)});
-  fonts_.push_back({I18N.get(StrId::STR_NOTO_SANS), true, static_cast<uint8_t>(CrossPointSettings::NOTOSANS)});
+  fonts_.push_back({I18N.get(StrId::STR_NOTO_SERIF), true, static_cast<uint8_t>(RadioInkSettings::NOTOSERIF)});
+  fonts_.push_back({I18N.get(StrId::STR_NOTO_SANS), true, static_cast<uint8_t>(RadioInkSettings::NOTOSANS)});
 
   if (registry_) {
     const auto& families = registry_->getFamilies();
     for (int i = 0; i < static_cast<int>(families.size()); i++) {
-      fonts_.push_back({families[i].name, false, static_cast<uint8_t>(CrossPointSettings::BUILTIN_FONT_COUNT + i)});
+      fonts_.push_back({families[i].name, false, static_cast<uint8_t>(RadioInkSettings::BUILTIN_FONT_COUNT + i)});
     }
   }
 
@@ -90,7 +90,7 @@ void FontSelectionActivity::loop() {
         SETTINGS.fontFamily = font.settingIndex;
         SETTINGS.sdFontFamilyName[0] = '\0';
       } else if (registry_) {
-        const int sdIdx = font.settingIndex - CrossPointSettings::BUILTIN_FONT_COUNT;
+        const int sdIdx = font.settingIndex - RadioInkSettings::BUILTIN_FONT_COUNT;
         const auto& families = registry_->getFamilies();
         if (sdIdx < static_cast<int>(families.size())) {
           strncpy(SETTINGS.sdFontFamilyName, families[sdIdx].name.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
@@ -130,11 +130,11 @@ void FontSelectionActivity::loop() {
 
 void FontSelectionActivity::handleSelection() {
   const auto& font = fonts_[selectedIndex_];
-  if (font.settingIndex < CrossPointSettings::BUILTIN_FONT_COUNT) {
+  if (font.settingIndex < RadioInkSettings::BUILTIN_FONT_COUNT) {
     SETTINGS.fontFamily = font.settingIndex;
     SETTINGS.sdFontFamilyName[0] = '\0';
   } else if (registry_) {
-    const int sdIdx = font.settingIndex - CrossPointSettings::BUILTIN_FONT_COUNT;
+    const int sdIdx = font.settingIndex - RadioInkSettings::BUILTIN_FONT_COUNT;
     const auto& families = registry_->getFamilies();
     if (sdIdx < static_cast<int>(families.size())) {
       strncpy(SETTINGS.sdFontFamilyName, families[sdIdx].name.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);

@@ -54,7 +54,7 @@ void syncTimeWithNTP() {
 void KOReaderSyncActivity::ensureEpubLoaded() {
   if (!epub) {
     LOG_DBG("KOSync", "Loading epub for progress mapping (heap: %u)", (unsigned)ESP.getFreeHeap());
-    epub = std::make_shared<Epub>(epubPath, "/.crosspoint");
+    epub = std::make_shared<Epub>(epubPath, "/.radioink");
     epub->setupCacheDir();
     // Load metadata only (no CSS needed for progress mapping, don't rebuild if cache is missing).
     if (!epub->load(false, true)) {
@@ -175,7 +175,7 @@ void KOReaderSyncActivity::performSync() {
   }
 
   SavedProgressPosition koPos = {remoteProgress.progress, remoteProgress.percentage};
-  remotePosition = ProgressMapper::toCrossPoint(epub, koPos, renderer, currentSpineIndex, totalPagesInSpine);
+  remotePosition = ProgressMapper::toRadioInk(epub, koPos, renderer, currentSpineIndex, totalPagesInSpine);
 
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   {

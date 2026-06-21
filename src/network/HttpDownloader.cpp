@@ -65,7 +65,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     return HttpDownloader::HTTP_ERROR;
   }
 
-  esp_http_client_set_header(client, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
+  esp_http_client_set_header(client, "User-Agent", "RadioInk-ESP32-" RADIOINK_VERSION);
   if (!username.empty() && !password.empty()) {
     // Preemptive Basic auth, like the prior addHeader; don't wait for a 401.
     const std::string credentials = username + ":" + password;

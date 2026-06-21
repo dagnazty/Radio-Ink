@@ -18,8 +18,8 @@
 
 #include <cstring>
 
-#include "CrossPointSettings.h"
-#include "CrossPointState.h"
+#include "RadioInkSettings.h"
+#include "RadioInkState.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
@@ -162,7 +162,7 @@ void silentRestartToReader() {
 // Verify power button press duration on wake-up from deep sleep
 // Pre-condition: isWakeupByPowerButton() == true
 void verifyPowerButtonDuration() {
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) {
+  if (SETTINGS.shortPwrBtn == RadioInkSettings::SHORT_PWRBTN::SLEEP) {
     // Fast path for short press
     // Needed because inputManager.isPressed() may take up to ~500ms to return the correct state
     return;
@@ -210,7 +210,7 @@ void waitForPowerRelease() {
   }
 }
 
-constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
+constexpr char SLEEP_FRAME_FILE[] = "/.radioink/sleep_frame.bin";
 
 static void saveSleepFrameBuffer() {
   HalFile file;
@@ -239,9 +239,9 @@ void enterDeepSleep(bool fromTimeout = false) {
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
 
   const bool isQuickResumeSleep =
-      SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
+      SETTINGS.sleepScreen == RadioInkSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
       (fromTimeout &&
-       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
+       SETTINGS.quickResumeSleepScreen == RadioInkSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
   APP_STATE.showBootScreen = !isQuickResumeSleep;
 
   APP_STATE.saveToFile();
@@ -344,7 +344,39 @@ void setup() {
 
   HalSystem::checkPanic();
 
+  // One-time migration: the data directory was renamed /.crosspoint -> /.radioink.
+  // Preserve existing settings/books/exports from devices that ran the old firmware.
+  if (!Storage.exists("/.radioink") && Storage.exists("/.crosspoint")) {
+    if (Storage.rename("/.crosspoint", "/.radioink")) {
+      LOG_INF("MAIN", "Migrated data dir /.crosspoint -> /.radioink");
+    } else {
+      LOG_ERR("MAIN", "Failed to migrate /.crosspoint -> /.radioink");
+    }
+  }
+
   SETTINGS.loadFromFile();
+
+  // One-time migration: the clock/battery Status Bar settings now drive the device-wide
+  // header too. Devices upgrading from when the clock was reader-only (and defaulted off)
+  // get it switched on once; the user can toggle it afterward and that choice sticks.
+  if (!Storage.exists("/.radioink/.hdrclk_migrated")) {
+    SETTINGS.statusBarClock = 1;
+    SETTINGS.saveToFile();
+    Storage.ensureDirectoryExists("/.radioink");
+    Storage.writeFile("/.radioink/.hdrclk_migrated", "1");
+    LOG_INF("MAIN", "Enabled device header clock (one-time migration)");
+  }
+
+  // One-time migration: switch to the Radio Ink theme. Runs before UITheme.reload()
+  // below so it takes effect this boot; the user can change it afterward.
+  if (!Storage.exists("/.radioink/.theme_migrated")) {
+    SETTINGS.uiTheme = RadioInkSettings::UI_THEME::RADIO_INK;
+    SETTINGS.saveToFile();
+    Storage.ensureDirectoryExists("/.radioink");
+    Storage.writeFile("/.radioink/.theme_migrated", "1");
+    LOG_INF("MAIN", "Switched to Radio Ink theme (one-time migration)");
+  }
+
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
@@ -358,7 +390,7 @@ void setup() {
     case HalGPIO::WakeupReason::PowerButton:
       LOG_DBG("MAIN", "Verifying power button press duration");
       gpio.verifyPowerButtonWakeup(SETTINGS.getPowerButtonDuration(),
-                                   SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
+                                   SETTINGS.shortPwrBtn == RadioInkSettings::SHORT_PWRBTN::SLEEP);
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:
       // If USB power caused a cold boot, go back to sleep
@@ -392,7 +424,7 @@ void setup() {
   }
 
   // First serial output only here to avoid timing inconsistencies for power button press duration verification
-  LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);
+  LOG_DBG("MAIN", "Starting RadioInk version " RADIOINK_VERSION);
 
   // Resolve the single boot-presentation decision. Skipping the splash also
   // skips the panel-clearing pass and the X3 initial-full-sync arming (see
@@ -504,11 +536,36 @@ void loop() {
       String cmd = line.substring(4);
       cmd.trim();
       if (cmd == "SCREENSHOT") {
+        RenderLock lock;  // freeze the framebuffer so we don't capture a half-drawn frame
         const uint32_t bufferSize = display.getBufferSize();
         logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
         uint8_t* buf = display.getFrameBuffer();
-        logSerial.write(buf, bufferSize);
-        logSerial.printf("SCREENSHOT_END\n");
+        // Chunk + flush so the USB-CDC TX buffer can't overflow before the host drains it.
+        constexpr uint32_t CHUNK = 512;
+        for (uint32_t off = 0; off < bufferSize; off += CHUNK) {
+          const uint32_t n = (bufferSize - off) < CHUNK ? (bufferSize - off) : CHUNK;
+          logSerial.write(buf + off, n);
+          logSerial.flush();
+        }
+        logSerial.printf("\nSCREENSHOT_END\n");
+      } else if (cmd.startsWith("KEY:")) {
+        String key = cmd.substring(4);
+        key.trim();
+        key.toUpperCase();
+        int button = -1;
+        if (key == "UP") button = HalGPIO::BTN_UP;
+        else if (key == "DOWN") button = HalGPIO::BTN_DOWN;
+        else if (key == "SELECT" || key == "CONFIRM") button = HalGPIO::BTN_CONFIRM;
+        else if (key == "BACK") button = HalGPIO::BTN_BACK;
+        else if (key == "LEFT") button = HalGPIO::BTN_LEFT;
+        else if (key == "RIGHT") button = HalGPIO::BTN_RIGHT;
+        else if (key == "POWER") button = HalGPIO::BTN_POWER;
+        if (button >= 0) {
+          gpio.injectTap(static_cast<uint8_t>(button));
+          logSerial.printf("KEY_OK:%s\n", key.c_str());
+        } else {
+          logSerial.println("KEY_FAIL");
+        }
       }
     }
   }
@@ -565,7 +622,7 @@ void loop() {
   }
 
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
+  if (SETTINGS.shortPwrBtn == RadioInkSettings::SHORT_PWRBTN::FORCE_REFRESH &&
       mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
     RenderLock lock;

@@ -6,7 +6,7 @@
 #include <Logging.h>
 #include <WiFi.h>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 #include "MappedInputManager.h"
 #include "WifiCredentialStore.h"
 #include "activities/util/KeyboardEntryActivity.h"
@@ -81,7 +81,7 @@ void WifiSelectionActivity::onExit() {
   LOG_DBG("WIFI", "Free heap after scanDelete: %d bytes", ESP.getFreeHeap());
 
   // Note: We do NOT disconnect WiFi here - the parent activity
-  // (CrossPointWebServerActivity) manages WiFi connection state. We just clean
+  // (RadioInkWebServerActivity) manages WiFi connection state. We just clean
   // up the scan and task.
 
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
@@ -216,10 +216,10 @@ void WifiSelectionActivity::attemptConnection() {
   WiFi.disconnect(true, true);  // Abort any in-progress SDK auto-connect and clear NVS-saved SSID
   delay(100);
 
-  // Set hostname so routers show "CrossPoint-Reader-AABBCCDDEEFF" instead of "esp32-XXXXXXXXXXXX"
+  // Set hostname so routers show "RadioInk-Reader-AABBCCDDEEFF" instead of "esp32-XXXXXXXXXXXX"
   String mac = WiFi.macAddress();
   mac.replace(":", "");
-  String hostname = "CrossPoint-Reader-" + mac;
+  String hostname = "RadioInk-Reader-" + mac;
   WiFi.setHostname(hostname.c_str());
 
   if (selectedRequiresPassword && !enteredPassword.empty()) {

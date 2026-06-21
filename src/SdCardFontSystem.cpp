@@ -3,13 +3,13 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 
 namespace {
 
 static uint8_t fontSizeEnumFromSettings() {
   uint8_t e = SETTINGS.fontSize;
-  if (e >= CrossPointSettings::FONT_SIZE_COUNT) e = 1;  // default to MEDIUM
+  if (e >= RadioInkSettings::FONT_SIZE_COUNT) e = 1;  // default to MEDIUM
   return e;
 }
 
@@ -19,7 +19,7 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
   registry_.discover();
 
   // Register this system as the SD font ID resolver in settings.
-  // Uses a static trampoline since CrossPointSettings stores a plain function pointer.
+  // Uses a static trampoline since RadioInkSettings stores a plain function pointer.
   SETTINGS.sdFontIdResolver = [](void* ctx, const char* familyName, uint8_t fontSizeEnum) -> int {
     return static_cast<SdCardFontSystem*>(ctx)->resolveFontId(familyName, fontSizeEnum);
   };

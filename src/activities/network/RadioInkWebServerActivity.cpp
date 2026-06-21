@@ -1,4 +1,4 @@
-#include "CrossPointWebServerActivity.h"
+#include "RadioInkWebServerActivity.h"
 
 #include <DNSServer.h>
 #include <ESPmDNS.h>
@@ -20,9 +20,9 @@
 
 namespace {
 // AP Mode configuration
-constexpr const char* AP_SSID = "CrossPoint-Reader";
+constexpr const char* AP_SSID = "RadioInk-Reader";
 constexpr const char* AP_PASSWORD = nullptr;  // Open network for ease of use
-constexpr const char* AP_HOSTNAME = "crosspoint";
+constexpr const char* AP_HOSTNAME = "radioink";
 constexpr uint8_t AP_CHANNEL = 1;
 constexpr uint8_t AP_MAX_CONNECTIONS = 4;
 constexpr int QR_CODE_WIDTH = 198;
@@ -60,7 +60,7 @@ int barsForRssi(int rssi, int currentBars) {
 }
 }  // namespace
 
-void CrossPointWebServerActivity::onEnter() {
+void RadioInkWebServerActivity::onEnter() {
   Activity::onEnter();
 
   LOG_DBG("WEBACT", "Free heap at onEnter: %d bytes", ESP.getFreeHeap());
@@ -86,7 +86,7 @@ void CrossPointWebServerActivity::onEnter() {
                          });
 }
 
-void CrossPointWebServerActivity::onExit() {
+void RadioInkWebServerActivity::onExit() {
   Activity::onExit();
 
   LOG_DBG("WEBACT", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
@@ -109,7 +109,7 @@ void CrossPointWebServerActivity::onExit() {
   LOG_DBG("WEBACT", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
 }
 
-void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) {
+void RadioInkWebServerActivity::onNetworkModeSelected(const NetworkMode mode) {
   const char* modeName = "Join Network";
   if (mode == NetworkMode::CONNECT_CALIBRE) {
     modeName = "Connect to Calibre";
@@ -162,7 +162,7 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   }
 }
 
-void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) {
+void RadioInkWebServerActivity::onWifiSelectionComplete(const bool connected) {
   LOG_DBG("WEBACT", "WifiSelectionActivity completed, connected=%d", connected);
 
   if (connected) {
@@ -189,7 +189,7 @@ void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) 
   }
 }
 
-void CrossPointWebServerActivity::startAccessPoint() {
+void RadioInkWebServerActivity::startAccessPoint() {
   LOG_DBG("WEBACT", "Starting Access Point mode...");
   LOG_DBG("WEBACT", "Free heap before AP start: %d bytes", ESP.getFreeHeap());
 
@@ -242,11 +242,11 @@ void CrossPointWebServerActivity::startAccessPoint() {
   startWebServer();
 }
 
-void CrossPointWebServerActivity::startWebServer() {
+void RadioInkWebServerActivity::startWebServer() {
   LOG_DBG("WEBACT", "Starting web server...");
 
   // Create the web server instance
-  webServer.reset(new CrossPointWebServer());
+  webServer.reset(new RadioInkWebServer());
   webServer->begin();
 
   if (webServer->isRunning()) {
@@ -265,7 +265,7 @@ void CrossPointWebServerActivity::startWebServer() {
   }
 }
 
-void CrossPointWebServerActivity::loop() {
+void RadioInkWebServerActivity::loop() {
   // Handle different states
   if (state == WebServerActivityState::SERVER_RUNNING) {
     // Handle DNS requests for captive portal (AP mode only)
@@ -363,7 +363,7 @@ void CrossPointWebServerActivity::loop() {
   }
 }
 
-void CrossPointWebServerActivity::render(RenderLock&&) {
+void RadioInkWebServerActivity::render(RenderLock&&) {
   // Only render our own UI when server is running
   // Subactivities handle their own rendering
   if (state == WebServerActivityState::SERVER_RUNNING || state == WebServerActivityState::AP_STARTING) {
@@ -388,7 +388,7 @@ void CrossPointWebServerActivity::render(RenderLock&&) {
   }
 }
 
-void CrossPointWebServerActivity::renderServerRunning() const {
+void RadioInkWebServerActivity::renderServerRunning() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
 
@@ -466,7 +466,7 @@ void CrossPointWebServerActivity::renderServerRunning() const {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
-void CrossPointWebServerActivity::renderWifiIndicator(int subHeaderTop) const {
+void RadioInkWebServerActivity::renderWifiIndicator(int subHeaderTop) const {
   constexpr int BAR_COUNT = 4;
   constexpr int BAR_WIDTH = 4;
   constexpr int BAR_GAP = 2;

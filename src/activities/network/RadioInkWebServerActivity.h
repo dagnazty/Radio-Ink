@@ -6,7 +6,7 @@
 
 #include "NetworkModeSelectionActivity.h"
 #include "activities/Activity.h"
-#include "network/CrossPointWebServer.h"
+#include "network/RadioInkWebServer.h"
 
 // Web server activity states
 enum class WebServerActivityState {
@@ -18,16 +18,16 @@ enum class WebServerActivityState {
 };
 
 /**
- * CrossPointWebServerActivity is the entry point for file transfer functionality.
+ * RadioInkWebServerActivity is the entry point for file transfer functionality.
  * It:
  * - First presents a choice between "Join a Network" (STA), "Connect to Calibre", and "Create Hotspot" (AP)
  * - For STA mode: Launches WifiSelectionActivity to connect to an existing network
  * - For AP mode: Creates an Access Point that clients can connect to
- * - Starts the CrossPointWebServer when connected
+ * - Starts the RadioInkWebServer when connected
  * - Handles client requests in its loop() function
  * - Cleans up the server and shuts down WiFi on exit
  */
-class CrossPointWebServerActivity final : public Activity {
+class RadioInkWebServerActivity final : public Activity {
   WebServerActivityState state = WebServerActivityState::MODE_SELECTION;
 
   // Network mode
@@ -35,7 +35,7 @@ class CrossPointWebServerActivity final : public Activity {
   bool isApMode = false;
 
   // Web server - owned by this activity
-  std::unique_ptr<CrossPointWebServer> webServer;
+  std::unique_ptr<RadioInkWebServer> webServer;
 
   // Server status
   std::string connectedIP;
@@ -61,8 +61,8 @@ class CrossPointWebServerActivity final : public Activity {
   void startWebServer();
 
  public:
-  explicit CrossPointWebServerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("CrossPointWebServer", renderer, mappedInput) {}
+  explicit RadioInkWebServerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+      : Activity("RadioInkWebServer", renderer, mappedInput) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

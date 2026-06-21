@@ -1,6 +1,7 @@
 #include "LyraTheme.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
@@ -107,13 +108,26 @@ void LyraTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t
 void LyraTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
   renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);
 
+  // Battery + clock follow the device-wide Status Bar settings.
+  const bool showBattery = SETTINGS.statusBarBattery;
   const bool showBatteryPercentage =
-      SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
+      SETTINGS.hideBatteryPercentage != RadioInkSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
   // Position icon at right edge, drawBatteryRight will place text to the left
   const int batteryX = rect.x + rect.width - 12 - LyraMetrics::values.batteryWidth;
-  drawBatteryRight(renderer,
-                   Rect{batteryX, rect.y + 5, LyraMetrics::values.batteryWidth, LyraMetrics::values.batteryHeight},
-                   showBatteryPercentage);
+  if (showBattery) {
+    drawBatteryRight(renderer,
+                     Rect{batteryX, rect.y + 5, LyraMetrics::values.batteryWidth, LyraMetrics::values.batteryHeight},
+                     showBatteryPercentage);
+  }
+  if (SETTINGS.statusBarClock && halClock.isAvailable()) {
+    char timeBuf[10];
+    if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
+      const int clockWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+      const int anchor =
+          showBattery ? (batteryX - 50) : (rect.x + rect.width - LyraMetrics::values.contentSidePadding);
+      renderer.drawText(SMALL_FONT_ID, anchor - clockWidth, rect.y + 7, timeBuf);
+    }
+  }
 
   int maxTitleWidth = title != nullptr ? renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD) : 0;
   int maxSubtitleWidth =

@@ -1,5 +1,5 @@
 /*
- * minibidi.c — Unicode Bidirectional Algorithm (UAX #9) for CrossPoint/ESP32C3
+ * minibidi.c — Unicode Bidirectional Algorithm (UAX #9) for RadioInk/ESP32C3
  *
  * Original author:  Ahmad Khalifa (www.arabeyes.org, MIT licence)
  * Mintty changes:   Thomas Wolff (rules N0, W7/L1/X9 fixes, isolates)

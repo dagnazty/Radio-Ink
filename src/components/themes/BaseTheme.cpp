@@ -335,16 +335,36 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   renderer.fillRect(rect.x + rect.width - maxBatteryWidth, rect.y + 5, maxBatteryWidth,
                     BaseMetrics::values.batteryHeight + 10, false);
 
+  // Battery and clock are device-wide now, controlled by the same Status Bar settings
+  // the reader uses (statusBarBattery / statusBarClock).
+  const bool showBattery = SETTINGS.statusBarBattery;
   const bool showBatteryPercentage =
-      SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
+      SETTINGS.hideBatteryPercentage != RadioInkSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
   // Position icon at right edge, drawBatteryRight will place text to the left
   const int batteryX = rect.x + rect.width - 12 - BaseMetrics::values.batteryWidth;
-  drawBatteryRight(renderer,
-                   Rect{batteryX, rect.y + 5, BaseMetrics::values.batteryWidth, BaseMetrics::values.batteryHeight},
-                   showBatteryPercentage);
+  if (showBattery) {
+    drawBatteryRight(renderer,
+                     Rect{batteryX, rect.y + 5, BaseMetrics::values.batteryWidth, BaseMetrics::values.batteryHeight},
+                     showBatteryPercentage);
+  }
+
+  // Clock to the left of the battery (right edge if the battery is hidden).
+  int clockReserve = 0;
+  if (SETTINGS.statusBarClock && halClock.isAvailable()) {
+    char timeBuf[10];
+    if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
+      const int clockWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+      const int clockX = showBattery ? (batteryX - 50 - clockWidth)
+                                     : (rect.x + rect.width - BaseMetrics::values.contentSidePadding - clockWidth);
+      renderer.drawText(SMALL_FONT_ID, clockX, rect.y + 7, timeBuf);
+      clockReserve = showBattery ? (50 + clockWidth) : (clockWidth + 12);
+    }
+  }
 
   if (title) {
-    int padding = rect.width - batteryX + BaseMetrics::values.batteryWidth;
+    const int rightBase = showBattery ? (rect.width - batteryX + BaseMetrics::values.batteryWidth)
+                                      : BaseMetrics::values.contentSidePadding;
+    int padding = rightBase + clockReserve;
     auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title,
                                                  rect.width - padding * 2 - BaseMetrics::values.contentSidePadding * 2,
                                                  EpdFontFamily::BOLD);
@@ -758,14 +778,14 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   }
 
   // Draw Progress Bar
-  if (SETTINGS.statusBarProgressBar != CrossPointSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS) {
+  if (SETTINGS.statusBarProgressBar != RadioInkSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS) {
     const int barMarginLeft = fillMargin ? 0 : orientedMarginLeft;
     const int barMarginRight = fillMargin ? 0 : orientedMarginRight;
     const int progressBarMaxWidth = renderer.getScreenWidth() - barMarginLeft - barMarginRight;
     const int progressBarY = renderer.getScreenHeight() - orientedMarginBottom -
                              ((SETTINGS.statusBarProgressBarThickness + 1) * 2) - paddingBottom + (fillMargin ? 1 : 0);
     size_t progress;
-    if (SETTINGS.statusBarProgressBar == CrossPointSettings::STATUS_BAR_PROGRESS_BAR::BOOK_PROGRESS) {
+    if (SETTINGS.statusBarProgressBar == RadioInkSettings::STATUS_BAR_PROGRESS_BAR::BOOK_PROGRESS) {
       progress = static_cast<size_t>(bookProgress);
     } else {
       // Chapter progress
@@ -779,7 +799,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
   // Draw Battery
   const bool showBatteryPercentage =
-      SETTINGS.hideBatteryPercentage == CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_NEVER;
+      SETTINGS.hideBatteryPercentage == RadioInkSettings::HIDE_BATTERY_PERCENTAGE::HIDE_NEVER;
   if (SETTINGS.statusBarBattery) {
     GUI.drawBatteryLeft(renderer,
                         Rect{metrics.statusBarHorizontalMargin + orientedMarginLeft + 1, textY, metrics.batteryWidth,

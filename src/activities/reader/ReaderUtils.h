@@ -1,6 +1,6 @@
 #pragma once
 
-#include <CrossPointSettings.h>
+#include <RadioInkSettings.h>
 #include <GfxRenderer.h>
 #include <HalTiltSensor.h>
 #include <Logging.h>
@@ -16,16 +16,16 @@ constexpr unsigned long BOOKMARK_MESSAGE_DURATION_MS = 2500;
 
 inline void applyOrientation(GfxRenderer& renderer, const uint8_t orientation) {
   switch (orientation) {
-    case CrossPointSettings::ORIENTATION::PORTRAIT:
+    case RadioInkSettings::ORIENTATION::PORTRAIT:
       renderer.setOrientation(GfxRenderer::Orientation::Portrait);
       break;
-    case CrossPointSettings::ORIENTATION::LANDSCAPE_CW:
+    case RadioInkSettings::ORIENTATION::LANDSCAPE_CW:
       renderer.setOrientation(GfxRenderer::Orientation::LandscapeClockwise);
       break;
-    case CrossPointSettings::ORIENTATION::INVERTED:
+    case RadioInkSettings::ORIENTATION::INVERTED:
       renderer.setOrientation(GfxRenderer::Orientation::PortraitInverted);
       break;
-    case CrossPointSettings::ORIENTATION::LANDSCAPE_CCW:
+    case RadioInkSettings::ORIENTATION::LANDSCAPE_CCW:
       renderer.setOrientation(GfxRenderer::Orientation::LandscapeCounterClockwise);
       break;
     default:
@@ -50,7 +50,7 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
       tiltPrev ||
       (usePress ? (input.wasPressed(MappedInputManager::Button::PageBack) || input.wasPressed(prevButton))
                 : (input.wasReleased(MappedInputManager::Button::PageBack) || input.wasReleased(prevButton)));
-  const bool powerTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
+  const bool powerTurn = SETTINGS.shortPwrBtn == RadioInkSettings::SHORT_PWRBTN::PAGE_TURN &&
                          input.wasReleased(MappedInputManager::Button::Power);
   const bool next = tiltNext || (usePress ? (input.wasPressed(MappedInputManager::Button::PageForward) || powerTurn ||
                                              input.wasPressed(nextButton))

@@ -11,41 +11,47 @@
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
+#include "components/themes/radioink/RadioInkTheme.h"
 #include "components/themes/roundedraff/RoundedRaffTheme.h"
 
 UITheme UITheme::instance;
 
 UITheme::UITheme() {
-  auto themeType = static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme);
+  auto themeType = static_cast<RadioInkSettings::UI_THEME>(SETTINGS.uiTheme);
   setTheme(themeType);
 }
 
 void UITheme::reload() {
-  auto themeType = static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme);
+  auto themeType = static_cast<RadioInkSettings::UI_THEME>(SETTINGS.uiTheme);
   setTheme(themeType);
 }
 
-void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
+void UITheme::setTheme(RadioInkSettings::UI_THEME type) {
   switch (type) {
-    case CrossPointSettings::UI_THEME::CLASSIC:
+    case RadioInkSettings::UI_THEME::CLASSIC:
       LOG_DBG("UI", "Using Classic theme");
       currentTheme = std::make_unique<BaseTheme>();
       currentMetrics = &BaseMetrics::values;
       break;
-    case CrossPointSettings::UI_THEME::LYRA:
+    case RadioInkSettings::UI_THEME::LYRA:
       LOG_DBG("UI", "Using Lyra theme");
       currentTheme = std::make_unique<LyraTheme>();
       currentMetrics = &LyraMetrics::values;
       break;
-    case CrossPointSettings::UI_THEME::ROUNDEDRAFF:
+    case RadioInkSettings::UI_THEME::ROUNDEDRAFF:
       LOG_DBG("UI", "Using RoundedRaff theme");
       currentTheme = std::make_unique<RoundedRaffTheme>();
       currentMetrics = &RoundedRaffMetrics::values;
       break;
-    case CrossPointSettings::UI_THEME::LYRA_3_COVERS:
+    case RadioInkSettings::UI_THEME::LYRA_3_COVERS:
       LOG_DBG("UI", "Using Lyra 3 Covers theme");
       currentTheme = std::make_unique<Lyra3CoversTheme>();
       currentMetrics = &Lyra3CoversMetrics::values;
+      break;
+    case RadioInkSettings::UI_THEME::RADIO_INK:
+      LOG_DBG("UI", "Using Radio Ink theme");
+      currentTheme = std::make_unique<RadioInkTheme>();
+      currentMetrics = &LyraMetrics::values;
       break;
   }
 }
@@ -132,10 +138,10 @@ int UITheme::getStatusBarHeight() {
 
   // Add status bar margin
   const bool showStatusBar = SETTINGS.statusBarChapterPageCount || SETTINGS.statusBarBookProgressPercentage ||
-                             SETTINGS.statusBarTitle != CrossPointSettings::STATUS_BAR_TITLE::HIDE_TITLE ||
+                             SETTINGS.statusBarTitle != RadioInkSettings::STATUS_BAR_TITLE::HIDE_TITLE ||
                              SETTINGS.statusBarBattery;
   const bool showProgressBar =
-      SETTINGS.statusBarProgressBar != CrossPointSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS;
+      SETTINGS.statusBarProgressBar != RadioInkSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS;
   return (showStatusBar ? (metrics.statusBarVerticalMargin) : 0) +
          (showProgressBar ? (((SETTINGS.statusBarProgressBarThickness + 1) * 2) + metrics.progressBarMarginTop) : 0);
 }
@@ -143,7 +149,7 @@ int UITheme::getStatusBarHeight() {
 int UITheme::getProgressBarHeight() {
   const ThemeMetrics& metrics = UITheme::getInstance().getMetrics();
   const bool showProgressBar =
-      SETTINGS.statusBarProgressBar != CrossPointSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS;
+      SETTINGS.statusBarProgressBar != RadioInkSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS;
   return (showProgressBar ? (((SETTINGS.statusBarProgressBarThickness + 1) * 2) + metrics.progressBarMarginTop) : 0);
 }
 

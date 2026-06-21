@@ -12,8 +12,8 @@
 #include <cstring>
 #include <vector>
 
-#include "CrossPointSettings.h"
-#include "CrossPointState.h"
+#include "RadioInkSettings.h"
+#include "RadioInkState.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
@@ -21,7 +21,7 @@
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Recents, File transfer, Settings
+  int count = 5;  // File Browser, Recents, File transfer, Radio Ink, Settings
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -63,7 +63,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
       if (!Storage.exists(coverPath.c_str())) {
         // If epub, try to load the metadata for title/author and cover
         if (FsHelpers::hasEpubExtension(book.path)) {
-          Epub epub(book.path, "/.crosspoint");
+          Epub epub(book.path, "/.radioink");
           // Skip loading css since we only need metadata here
           epub.load(false, true);
 
@@ -82,7 +82,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
           requestUpdate();
         } else if (FsHelpers::hasXtcExtension(book.path)) {
           // Handle XTC file
-          Xtc xtc(book.path, "/.crosspoint");
+          Xtc xtc(book.path, "/.radioink");
           if (xtc.load()) {
             // Try to generate thumbnail image for Continue Reading card
             if (!showingLoading) {
@@ -197,6 +197,9 @@ void HomeActivity::loop() {
         case HomeMenuItem::FILE_TRANSFER:
           onFileTransferOpen();
           break;
+        case HomeMenuItem::RADIO_AUDIT:
+          onRadioAuditOpen();
+          break;
         case HomeMenuItem::SETTINGS_MENU:
           onSettingsOpen();
           break;
@@ -218,22 +221,27 @@ void HomeActivity::render(RenderLock&&) {
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding},
                  metrics.homeContinueReadingInMenu && !recentBooks.empty() ? recentBooks[0].title.c_str() : nullptr);
 
+  // Start the cover below the header band so the book never overlaps the
+  // bracketed brand / heavy rule. The menu Y below is unchanged, so the
+  // Settings-vs-logo alignment stays put.
+  const int coverY = metrics.homeTopPadding + 16;
+
   // Record the tile rect so storeCoverBuffer (called from the theme) knows
   // which sub-region of the framebuffer to snapshot. ~16 KB in Portrait
   // instead of the 48 KB full framebuffer the previous bind captured.
   coverRectX = 0;
-  coverRectY = metrics.homeTopPadding;
+  coverRectY = coverY;
   coverRectW = pageWidth;
   coverRectH = metrics.homeCoverTileHeight;
 
-  GUI.drawRecentBookCover(renderer, Rect{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight},
-                          recentBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
+  GUI.drawRecentBookCover(renderer, Rect{0, coverY, pageWidth, metrics.homeCoverTileHeight}, recentBooks, selectorIndex,
+                          coverRendered, coverBufferStored, bufferRestored,
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
+                                        "Radio Ink", tr(STR_SETTINGS_TITLE)};
+  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Wifi, Settings};
 
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
@@ -256,6 +264,7 @@ void HomeActivity::render(RenderLock&&) {
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });
 
+  // The Radio Ink theme stamps the skull logo in drawButtonHints.
   const auto labels = mappedInput.mapLabels("", tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
@@ -279,5 +288,7 @@ void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+
+void HomeActivity::onRadioAuditOpen() { activityManager.goToRadioAudit(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }

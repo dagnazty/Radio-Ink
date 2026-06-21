@@ -8,7 +8,7 @@
 
 #include <algorithm>
 
-#include "CrossPointSettings.h"
+#include "RadioInkSettings.h"
 #include "MappedInputManager.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"

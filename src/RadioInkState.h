@@ -2,9 +2,9 @@
 #include <cstdint>
 #include <string>
 
-class CrossPointState {
+class RadioInkState {
   // Static instance
-  static CrossPointState instance;
+  static RadioInkState instance;
 
  public:
   static constexpr uint8_t SLEEP_RECENT_COUNT = 16;
@@ -22,10 +22,10 @@ class CrossPointState {
   bool isRecentSleep(uint16_t idx, uint8_t checkCount) const;
 
   void pushRecentSleep(uint16_t idx);
-  ~CrossPointState() = default;
+  ~RadioInkState() = default;
 
   // Get singleton instance
-  static CrossPointState& getInstance() { return instance; }
+  static RadioInkState& getInstance() { return instance; }
 
   bool saveToFile() const;
 
@@ -36,4 +36,4 @@ class CrossPointState {
 };
 
 // Helper macro to access settings
-#define APP_STATE CrossPointState::getInstance()
+#define APP_STATE RadioInkState::getInstance()
