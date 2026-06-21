@@ -1,9 +1,18 @@
 # Radio Ink
 
-Open-source RF-audit firmware for the **Xteink X3** (ESP32-C3 e-reader), forked from the
-CrossPoint reader. It keeps the full e-reader (EPUB/TXT/XTC, OPDS, file transfer, KOReader sync)
-and adds a **Wi-Fi / BLE auditing tool**, a custom **hacker-hiphop theme**, and a serial-driven
-**dev rig** that lets a developer drive and screenshot the device over USB.
+Open-source RF-audit firmware for the **Xteink X3 / X4** (ESP32-C3 e-ink devices), forked from the
+[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader). It keeps the full
+e-reader (EPUB/TXT/XTC, OPDS, file transfer, KOReader sync) and adds a **Wi-Fi / BLE auditing
+toolkit**, a custom **hacker-hiphop theme**, and a serial-driven **dev rig** that lets a developer
+drive and screenshot the device over USB.
+
+- **Author:** dag nazty — <https://dagnazty.dev>
+- **Version:** `1.3.0` base (`RADIOINK_VERSION` adds branch + short SHA; shown on the boot screen,
+  Settings header, and **Radio Ink → About**).
+- **Built on:** CrossPoint Reader by Dave Allie & community (MIT); originally inspired by atomic14's
+  [diy-esp32-epub-reader](https://github.com/atomic14/diy-esp32-epub-reader). See [Credits](#10-credits--license).
+- ⚠️ **Authorized testing only.** Transmitting/attack features are compiled out of release builds and
+  require an on-device confirmation in dev builds.
 
 ---
 
@@ -15,7 +24,11 @@ and adds a **Wi-Fi / BLE auditing tool**, a custom **hacker-hiphop theme**, and 
 - **RTC:** DS3231 (I²C `0x68`) — battery-backed, X3-only. Tracks **time-of-day only** (no date);
   synced from NTP on first WiFi connect.
 - **Battery:** `powerManager.getBatteryPercentage()`.
-- **Flash:** ~84 % used. No room for large lookup tables (e.g. a full OUI DB).
+- **Flash:** ~85 % of a 6.25 MB app partition (dual-OTA layout). No room for large lookup tables
+  (e.g. a full OUI DB).
+- **RAM discipline:** result vectors are `reserve()`d at activity entry and the 32 KB PCAP ring +
+  capture tables are heap-allocated **on demand** (freed when idle) so the BLE controller (~65 KB at
+  init) has headroom. BLE scans are heap-floor guarded and run in bounded short windows.
 
 ## 2. Repo, build, flash
 
@@ -64,44 +77,68 @@ scripts/screenshot.sh                       # -> /tmp/device_screen.png
 
 ## 4. Radio Ink audit tool
 
-`src/activities/util/RadioAuditActivity.{h,cpp}` — reachable from Home → **Radio Ink**. The action
-menu is grouped into **submenu categories**:
+`src/activities/util/RadioAuditActivity.{h,cpp}` (+ stateless helpers in `RadioAuditHelpers.{h,cpp}`)
+— reachable from Home → **Radio Ink**. Menu is a two-level category tree: an `enum class Action`
+dispatched by an exhaustive `switch`, with categories declared as data tables (add a category + a
+case to extend). Categories:
 
-- **Scan:** Quick Scan, Deep Scan, Client Recon (probes)
-- **Results:** Audit Findings, View WiFi results, View BLE results, Channel usage
-- **Export:** Save text / CSV / JSON
+| Category | Items |
+|---|---|
+| **Recon** | Quick Scan · Deep Scan · WiFi Scan · BLE Scan · Client Recon (probes) · Channel usage · Tracker Sweep |
+| **Capture** | Live PCAP capture · Handshake / PMKID |
+| **Attacks** ⚠ *(dev builds only)* | Deauth (all APs) · Deauth selected · Beacon flood · Evil Twin / Portal · BLE Spoof |
+| **Files** | Browse SD files |
+| **Results** | Audit Findings · View WiFi results · View BLE results · Camera Sweep |
+| **Export** | Save text / CSV / JSON |
+| **About** | Version + credits |
 
-### Scanning
-- **Quick/Deep Scan** — multi-pass WiFi (`WiFi.scanNetworks`) + BLE (passive, WiFi off first to
-  avoid coexistence OOM). Deep = 3 passes; merges findings, averages RSSI, tracks seen-count.
-- **Per-target deep scan** — Select a WiFi/BLE row in the results list to drill in.
-  - *WiFi:* locks to the AP channel in **promiscuous mode** (`esp_wifi_set_promiscuous`) and parses
-    802.11 frames for: associated **client MACs**, RSSI avg/min/max, beacon/data/mgmt counts,
-    **deauth/disassoc** frames (attack/evil-twin signal), and security posture from beacons
-    (Privacy / PMF / WPS) + randomized-BSSID detection.
-  - *BLE:* focused multi-pass scan of one address → RSSI profile, company ID, services, TX power,
-    random-address detection.
-- **Client Recon** — channel-hops 1–13 in promiscuous mode capturing **probe requests**: client
-  MACs + the SSIDs their devices are searching for.
+### Recon (passive)
+- **Quick/Deep Scan** — multi-pass WiFi (`WiFi.scanNetworks`) + BLE (active, WiFi off first to avoid
+  coexistence OOM). Deep = 3 passes; merges findings, averages RSSI, tracks seen-count.
+- **Per-target deep scan** — Select a WiFi/BLE row to drill in. The detail view's **Actions** menu
+  offers (WiFi) mark-for-deauth / deauth-this-AP / locate, or (BLE) **GATT enumerate** / locate.
+  - *WiFi:* locks to the AP channel in **promiscuous mode** and parses 802.11 for associated **client
+    MACs**, RSSI avg/min/max, beacon/data/mgmt counts, **deauth/disassoc** frames, and security
+    posture (Privacy / PMF / WPS) + randomized-BSSID detection.
+  - *BLE:* focused scan → RSSI, company ID, services, TX power; **GATT enumerate** connects and dumps
+    services/characteristics (R/W/N/I).
+- **Client Recon** — channel-hops 1–13 capturing **probe requests** (client MACs + searched SSIDs).
+- **Tracker Sweep** — active BLE scan flagging **AirTag/FindMy, Tile, Samsung SmartTag, Chipolo**.
 
-### Intelligence
-- **BLE advertiser decoding** — iBeacon (UUID + major/minor), Eddystone (UID/URL/TLM), Apple
-  Continuity incl. **AirTag/FindMy**, AirPods, Swift Pair, Fast Pair — decoded from the manufacturer
-  / service data already captured.
-- **Vendor lookup** — curated OUI→vendor table (Espressif, Apple, Raspberry Pi, Samsung, …) for
-  AP/client/BLE MACs; flags locally-administered ("randomized") MACs.
-- **Auto findings** — WPS, missing PMF, open/WEP, close BLE, **possible tracker** (AirTag),
-  deauth activity, etc. Findings are selectable → jump to the related target's deep scan.
-- **Watchlist** — drop `/.radioink/watchlist.txt` (one MAC/prefix per line); matches raise a HIGH
-  "Watchlist hit".
-- **Scan-to-scan diff** — each scan compares against the previous snapshot
-  (`/.radioink/last_scan.txt`) and flags **NEW / GONE** devices.
-- **Channel usage** — bar chart of APs per channel from the last scan.
-- **RSSI locator** — from a deep-scan detail, "Locate" gives a live signal meter + warmer/colder to
-  physically find the target.
+### Capture (→ SD)
+- **Live PCAP** — promiscuous frames streamed to `/.radioink/captures/*.pcap` (LINKTYPE_IEEE802_11)
+  via a lock-free SPSC ring (Wi-Fi callback producer → activity-loop SD writer). Open in Wireshark.
+- **Handshake / PMKID** — detects EAPOL M1/M2 (ANONCE/MIC, MIC zeroed) and RSN PMKID, exports
+  **hashcat `22000`** to `/.radioink/captures/hs-*.22000`. In-screen **Deauth** forces a reconnect
+  and locks the channel to catch the handshake without leaving the screen.
 
-### Output
-- **Reports** — text / CSV / JSON saved under `/.radioink/`, stamped with the RTC time of scan.
+### Attacks ⚠ (compiled out of release; one-time on-device authorization in dev builds)
+Requires `-DRADIO_AUDIT_ENABLE_ACTIVE` (in `[env:default]` only) and `-Wl,--allow-multiple-definition`
+to override the IDF's `ieee80211_raw_frame_sanity_check` for raw TX.
+- **Deauth** — focused (one AP from its detail menu), grouped (mark several in WiFi results, then
+  "Deauth selected"), or all visible APs. Round-robins targets, broadcast deauth+disassoc.
+- **Beacon flood** — random SSIDs across channels.
+- **Evil Twin / Portal** — open rogue AP cloning a chosen SSID + DNS captive portal + credential
+  page → `/.radioink/loot/`. (`EvilTwinActivity`, also compiled out of release.)
+- **BLE Spoof** — floods phantom BLE advertisers.
+
+### Analysis & output
+- **Audit findings** — WPS, missing PMF, open/WEP, duplicate-SSID/rogue-AP, deauth activity,
+  possible tracker, etc. Selectable → jump to the related target's deep scan.
+- **Camera Sweep** — runs a fresh WiFi AP scan + **associated-client OUI capture** + active BLE, then
+  fingerprints likely cameras (camera SSIDs/names, Amazon = Ring/Blink clients, Hikvision/Dahua/Axis).
+- **Intelligence** — OUI→vendor lookup, BLE advert decode (iBeacon/Eddystone/Apple Continuity),
+  `watchlist.txt` matching, scan-to-scan **NEW/GONE** diff, channel-usage map, RSSI **locator**.
+- **Files browser** — list/delete everything under `/.radioink/` on-device.
+- **Reports** — TXT / CSV / JSON under `/.radioink/`, RTC-stamped.
+
+### SD layout
+```
+/.radioink/
+├── radio_ink/    reports + watchlist.txt + last_scan.txt (diff snapshot)
+├── captures/     *.pcap, *.22000
+└── loot/         evil-twin captured credentials (dev builds)
+```
 
 ## 5. Theme — `RadioInkTheme` (hacker × hiphop)
 
@@ -148,7 +185,9 @@ Calibre "CrossPoint Reader" plugin name.
 ## 9. Key files
 
 ```
-src/activities/util/RadioAuditActivity.{h,cpp}     audit tool
+src/activities/util/RadioAuditActivity.{h,cpp}      audit tool (menu, scans, capture, attacks)
+src/activities/util/RadioAuditHelpers.{h,cpp}       stateless helpers (hex/MAC/OUI/BLE decode/classifiers)
+src/activities/util/EvilTwinActivity.{h,cpp}        rogue AP + captive portal (dev builds only)
 src/components/themes/radioink/RadioInkTheme.{h,cpp} theme
 src/components/themes/lyra/LyraTheme.*              base theme + metrics
 src/images/RadioInkSkull.h                          logo bitmap (128px)
@@ -156,3 +195,20 @@ src/main.cpp                                        loop, CMD: handlers, migrati
 lib/hal/HalGPIO.{h,cpp}                             button input + tap injection
 scripts/grab_screen.py, key.py, screenshot.sh       dev rig
 ```
+
+## 10. Credits & license
+
+Radio Ink is a fork and would not exist without the upstream work it builds on:
+
+- **[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** — by **Dave Allie**
+  and the CrossPoint community. Radio Ink keeps CrossPoint's reading engine, HAL, theming, i18n, and
+  wireless stack; the e-reader half of this firmware is entirely their work.
+- **[diy-esp32-epub-reader](https://github.com/atomic14/diy-esp32-epub-reader)** by **atomic14** —
+  the project that originally inspired CrossPoint.
+- The CrossPoint contributors, translators, and community-fork authors (see upstream
+  [GOVERNANCE.md](./GOVERNANCE.md)).
+- **Radio Ink** — the RF-audit fork, audit tool, theme, and dev rig — by **dag nazty**
+  (<https://dagnazty.dev>), at <https://github.com/dagnazty/Radio-Ink>.
+
+**License:** MIT (see [LICENSE](./LICENSE)) — original copyright © 2025 Dave Allie; Radio Ink
+modifications retain the same MIT license. **Not affiliated with Xteink.** Authorized testing only.

@@ -50,7 +50,7 @@ void RadioInkTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const cha
   }
 
   // Bracketed brand/title, top-left, bold. Home (no title) shows the brand.
-  const std::string brand = std::string("[ ") + (title ? title : "RADIO INK") + " ]";
+  const std::string brand = std::string("[ ") + (title ? title : "Radio Ink") + " ]";
   const int maxW = rect.width - pad * 2 - rightReserve;
   const auto shown = renderer.truncatedText(UI_12_FONT_ID, brand.c_str(), maxW, EpdFontFamily::BOLD);
   renderer.drawText(UI_12_FONT_ID, rect.x + pad, rect.y + 7, shown.c_str(), true, EpdFontFamily::BOLD);

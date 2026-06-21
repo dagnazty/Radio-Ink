@@ -218,13 +218,13 @@ void HomeActivity::render(RenderLock&&) {
   renderer.clearScreen();
   bool bufferRestored = coverBufferStored && restoreCoverBuffer();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding},
+  // Use the SAME header band as every other screen (headerHeight, not the
+  // shorter homeTopPadding) so the header is uniform across the device.
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
                  metrics.homeContinueReadingInMenu && !recentBooks.empty() ? recentBooks[0].title.c_str() : nullptr);
 
-  // Start the cover below the header band so the book never overlaps the
-  // bracketed brand / heavy rule. The menu Y below is unchanged, so the
-  // Settings-vs-logo alignment stays put.
-  const int coverY = metrics.homeTopPadding + 16;
+  // Start the cover just below the (now standard-height) header band.
+  const int coverY = metrics.topPadding + metrics.headerHeight + 6;
 
   // Record the tile rect so storeCoverBuffer (called from the theme) knows
   // which sub-region of the framebuffer to snapshot. ~16 KB in Portrait
@@ -254,12 +254,10 @@ void HomeActivity::render(RenderLock&&) {
     menuIcons.insert(menuIcons.begin(), Book);
   }
 
+  const int menuY = coverY + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int menuHeight = pageHeight - menuY - metrics.buttonHintsHeight - metrics.verticalSpacing;
   GUI.drawButtonMenu(
-      renderer,
-      Rect{0, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, pageWidth,
-           pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
-                         metrics.homeMenuTopOffset + metrics.buttonHintsHeight)},
-      static_cast<int>(menuItems.size()),
+      renderer, Rect{0, menuY, pageWidth, menuHeight}, static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - recentBooks.size(),
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });

@@ -129,6 +129,7 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
 
   // Footer / Hints
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  UITheme::getInstance().suppressBrandLogoOnce();  // ebook settings menu: no brand skull in the corner
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();

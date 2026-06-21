@@ -1,8 +1,13 @@
 name: Compile Release
+
 on:
   push:
     tags:
       - '*'
+
+# Needed so the workflow can create a GitHub Release and upload assets.
+permissions:
+  contents: write
 
 jobs:
   build-release:
@@ -32,16 +37,38 @@ jobs:
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
-      - name: Build CrossPoint
+      - name: Set firmware version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"   # strip a leading "v" (v1.0.0 -> 1.0.0)
+          echo "Building Radio Ink ${VERSION}"
+          sed -i "s/^version = .*/version = ${VERSION}/" platformio.ini
+
+      - name: Build Radio Ink (release)
         run: pio run -e gh_release
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          B=.pio/build/gh_release
+          T="${GITHUB_REF_NAME}"
+          cp "$B/firmware.bin"   "dist/RadioInk-${T}-firmware.bin"
+          cp "$B/bootloader.bin" "dist/RadioInk-${T}-bootloader.bin"
+          cp "$B/partitions.bin" "dist/RadioInk-${T}-partitions.bin"
+          cp "$B/firmware.elf"   "dist/RadioInk-${T}-firmware.elf"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: CrossPoint-${{ github.ref_name }}
-          path: |
-            .pio/build/gh_release/bootloader.bin
-            .pio/build/gh_release/firmware.bin
-            .pio/build/gh_release/firmware.elf
-            .pio/build/gh_release/firmware.map
-            .pio/build/gh_release/partitions.bin
+          name: Radio Ink ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            Radio Ink ${{ github.ref_name }}
+
+            Flash `RadioInk-${{ github.ref_name }}-firmware.bin` with the official web
+            flasher at https://espterminator.com/ (or via esptool at offset `0x10000`).
+            For a fresh full flash, also write `bootloader.bin` (0x0) and
+            `partitions.bin` (0x8000).
+
+            ⚠️ Authorized testing only. Transmitting/attack features are compiled out of
+            this release build.

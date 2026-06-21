@@ -37,15 +37,15 @@ jobs:
           echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
           echo "BRANCH_SUFFIX=${GITHUB_REF_NAME#release/}" >> $GITHUB_ENV
 
-      - name: Build CrossPoint Release Candidate
+      - name: Build Radio Ink Release Candidate
         env:
-          CROSSPOINT_RC_HASH: ${{ env.SHORT_SHA }}
+          RADIOINK_RC_HASH: ${{ env.SHORT_SHA }}
         run: pio run -e gh_release_rc
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CrossPoint-RC-${{ env.BRANCH_SUFFIX }}
+          name: RadioInk-RC-${{ env.BRANCH_SUFFIX }}
           path: |
             .pio/build/gh_release_rc/bootloader.bin
             .pio/build/gh_release_rc/firmware.bin
