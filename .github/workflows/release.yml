@@ -5,6 +5,19 @@ on:
     tags:
       - '*'
 
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: Create a GitHub Release from this run
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: Release tag to create, for example v0.1.1. Leave blank to use the current firmware version.
+        required: false
+        default: ""
+        type: string
+
 # Needed so the workflow can create a GitHub Release and upload assets.
 permissions:
   contents: write
