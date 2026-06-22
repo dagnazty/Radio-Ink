@@ -85,9 +85,18 @@ jobs:
 
       - name: Stage release assets
         run: |
+          set -euo pipefail
+
           mkdir -p dist
           B=.pio/build/gh_release
           T="${RELEASE_TAG}"
+          pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32c3 merge_bin \
+            -o "dist/RadioInk-${T}-full.bin" \
+            --flash_mode dio \
+            --flash_size 16MB \
+            0x0 "$B/bootloader.bin" \
+            0x8000 "$B/partitions.bin" \
+            0x10000 "$B/firmware.bin"
           cp "$B/firmware.bin"   "dist/RadioInk-${T}-firmware.bin"
           cp "$B/bootloader.bin" "dist/RadioInk-${T}-bootloader.bin"
           cp "$B/partitions.bin" "dist/RadioInk-${T}-partitions.bin"
@@ -113,10 +122,12 @@ jobs:
           body: |
             Radio Ink ${{ env.RELEASE_TAG }}
 
-            Flash `RadioInk-${{ env.RELEASE_TAG }}-firmware.bin` with the official web
-            flasher at https://espterminator.com/ (or via esptool at offset `0x10000`).
-            For a fresh full flash, also write `bootloader.bin` (0x0) and
-            `partitions.bin` (0x8000).
+            For a fresh full flash, write `RadioInk-${{ env.RELEASE_TAG }}-full.bin`
+            at offset `0x0`.
+
+            For app-only updates, flash `RadioInk-${{ env.RELEASE_TAG }}-firmware.bin`
+            with the official web flasher at https://espterminator.com/ (or via esptool
+            at offset `0x10000`).
 
             ⚠️ Authorized testing only. Transmitting/attack features are compiled out of
             this release build.
