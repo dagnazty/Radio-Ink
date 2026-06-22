@@ -50,11 +50,35 @@ jobs:
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
-      - name: Set firmware version from tag
+      - name: Resolve release metadata
+        env:
+          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"   # strip a leading "v" (v1.0.0 -> 1.0.0)
-          echo "Building Radio Ink ${VERSION}"
-          sed -i "s/^version = .*/version = ${VERSION}/" platformio.ini
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          elif [ -n "${DISPATCH_RELEASE_TAG}" ]; then
+            RELEASE_TAG="${DISPATCH_RELEASE_TAG}"
+          else
+            CURRENT_VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' platformio.ini | head -n 1)"
+            if [ -z "${CURRENT_VERSION}" ]; then
+              echo "Could not read firmware version from platformio.ini" >&2
+              exit 1
+            fi
+            RELEASE_TAG="v${CURRENT_VERSION}"
+          fi
+
+          VERSION="${RELEASE_TAG#v}"   # strip a leading "v" (v1.0.0 -> 1.0.0)
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "FIRMWARE_VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set firmware version
+        run: |
+          set -euo pipefail
+
+          echo "Building Radio Ink ${FIRMWARE_VERSION}"
+          sed -i "s/^version = .*/version = ${FIRMWARE_VERSION}/" platformio.ini
 
       - name: Build Radio Ink (release)
         run: pio run -e gh_release
@@ -63,22 +87,33 @@ jobs:
         run: |
           mkdir -p dist
           B=.pio/build/gh_release
-          T="${GITHUB_REF_NAME}"
+          T="${RELEASE_TAG}"
           cp "$B/firmware.bin"   "dist/RadioInk-${T}-firmware.bin"
           cp "$B/bootloader.bin" "dist/RadioInk-${T}-bootloader.bin"
           cp "$B/partitions.bin" "dist/RadioInk-${T}-partitions.bin"
           cp "$B/firmware.elf"   "dist/RadioInk-${T}-firmware.elf"
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload release assets
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.create_release }}
+        uses: actions/upload-artifact@v6
         with:
-          name: Radio Ink ${{ github.ref_name }}
+          name: RadioInk-${{ env.RELEASE_TAG }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.create_release) }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Radio Ink ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           files: dist/*
           body: |
-            Radio Ink ${{ github.ref_name }}
+            Radio Ink ${{ env.RELEASE_TAG }}
 
-            Flash `RadioInk-${{ github.ref_name }}-firmware.bin` with the official web
+            Flash `RadioInk-${{ env.RELEASE_TAG }}-firmware.bin` with the official web
             flasher at https://espterminator.com/ (or via esptool at offset `0x10000`).
             For a fresh full flash, also write `bootloader.bin` (0x0) and
             `partitions.bin` (0x8000).
