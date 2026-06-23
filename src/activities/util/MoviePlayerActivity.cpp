@@ -11,6 +11,7 @@
 
 namespace {
 constexpr const char* MOVIES_DIR = "/.radioink/movies";
+constexpr const char* AUTOLOOP_PATH = "/.radioink/movies/.autoloop";  // presence = autoloop on
 constexpr size_t RIVID_HEADER_SIZE = 16;
 constexpr uint16_t MAX_W = 800;
 constexpr uint16_t MAX_H = 480;
@@ -19,6 +20,7 @@ constexpr uint16_t MAX_H = 480;
 void MoviePlayerActivity::onEnter() {
   Activity::onEnter();
   Storage.ensureDirectoryExists(MOVIES_DIR);
+  autoLoop = Storage.exists(AUTOLOOP_PATH);
   loadMovieList();
   state = State::LIST;
   requestUpdate();
@@ -162,10 +164,12 @@ void MoviePlayerActivity::loop() {
         return;
       }
       if (movies.empty()) return;
-      if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+      // Use the aggregate Nav buttons (side Up/Down + front Left/Right, orientation
+      // aware) so the front buttons work here like every other menu.
+      if (mappedInput.wasPressed(MappedInputManager::Button::NavPrevious)) {
         selected = (selected == 0) ? static_cast<int>(movies.size()) - 1 : selected - 1;
         requestUpdate();
-      } else if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+      } else if (mappedInput.wasPressed(MappedInputManager::Button::NavNext)) {
         selected = (selected + 1) % static_cast<int>(movies.size());
         requestUpdate();
       } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
@@ -183,7 +187,9 @@ void MoviePlayerActivity::loop() {
         requestUpdate();
         return;
       }
-      advanceFrame();
+      // Between frames there's nothing to do; yield instead of busy-spinning at
+      // full clock (skipLoopDelay keeps power-save off during playback).
+      if (!advanceFrame()) delay(15);
       return;
 
     case State::PAUSED:
@@ -193,6 +199,8 @@ void MoviePlayerActivity::loop() {
         lastFrameMs = millis();
         state = State::PLAYING;
         requestUpdate();
+      } else if (mappedInput.wasPressed(MappedInputManager::Button::NavPrevious)) {
+        toggleAutoLoop();
       }
       return;
 
@@ -204,6 +212,8 @@ void MoviePlayerActivity::loop() {
         lastFrameMs = millis();
         state = State::PLAYING;
         requestUpdate();
+      } else if (mappedInput.wasPressed(MappedInputManager::Button::NavPrevious)) {
+        toggleAutoLoop();
       }
       return;
 
@@ -216,15 +226,28 @@ void MoviePlayerActivity::loop() {
   }
 }
 
-void MoviePlayerActivity::advanceFrame() {
+bool MoviePlayerActivity::advanceFrame() {
   const uint32_t now = millis();
   const uint32_t interval = 1000u / fps;
-  if (now - lastFrameMs < interval) return;  // e-ink refresh usually paces this anyway
+  if (now - lastFrameMs < interval) return false;  // not time yet
   lastFrameMs = now;
   currentFrame++;
   if (currentFrame >= frameCount) {
-    state = State::ENDED;
+    if (autoLoop)
+      currentFrame = 0;  // restart, keep playing
+    else
+      state = State::ENDED;
   }
+  requestUpdate();
+  return true;
+}
+
+void MoviePlayerActivity::toggleAutoLoop() {
+  autoLoop = !autoLoop;
+  if (autoLoop)
+    Storage.writeFile(AUTOLOOP_PATH, "1");  // presence persists the choice across reboots
+  else
+    Storage.remove(AUTOLOOP_PATH);
   requestUpdate();
 }
 
@@ -279,7 +302,8 @@ void MoviePlayerActivity::renderList() {
   renderer.displayBuffer();
 }
 
-void MoviePlayerActivity::renderMessage(const char* title, const char* line1, const char* line2) {
+void MoviePlayerActivity::renderMessage(const char* title, const char* line1, const char* line2,
+                                       const char* confirmLabel, bool showLoop) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
   renderer.clearScreen();
@@ -289,9 +313,16 @@ void MoviePlayerActivity::renderMessage(const char* title, const char* line1, co
     renderer.drawText(UI_12_FONT_ID, metrics.contentSidePadding, y, line1, true, EpdFontFamily::BOLD);
     y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
   }
-  if (line2 && line2[0]) renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, y, line2);
+  if (line2 && line2[0]) {
+    renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, y, line2);
+    y += renderer.getLineHeight(SMALL_FONT_ID) + 8;
+  }
+  if (showLoop) {
+    renderer.drawText(UI_12_FONT_ID, metrics.contentSidePadding, y,
+                      autoLoop ? "Autoloop: [x] ON" : "Autoloop: [ ] OFF", true, EpdFontFamily::BOLD);
+  }
 
-  const auto labels = mappedInput.mapLabels("Back", "OK", "", "");
+  const auto labels = mappedInput.mapLabels("Back", confirmLabel, showLoop ? "Loop" : "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
 }
@@ -305,10 +336,10 @@ void MoviePlayerActivity::render(RenderLock&&) {
       drawCurrentFrame();
       return;
     case State::PAUSED:
-      renderMessage("Paused", status.c_str(), "Confirm resumes, Back stops.");
+      renderMessage("Paused", status.c_str(), "", "Resume", true);
       return;
     case State::ENDED:
-      renderMessage("End", status.c_str(), "Confirm replays, Back to list.");
+      renderMessage("End", status.c_str(), "", "Replay", true);
       return;
     case State::ERROR:
       renderMessage("Movie error", status.c_str(), "Press a button to continue.");

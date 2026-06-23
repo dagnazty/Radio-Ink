@@ -31,6 +31,16 @@ std::string humanFileSize(uint32_t bytes) {
   return std::string(buf);
 }
 
+// OS/filesystem cruft that should never show in the browser (even with hidden
+// files on) -- e.g. the macOS metadata folders that appear on a FAT SD card.
+bool isJunkEntry(const char* name) {
+  static const char* const kJunk[] = {"System Volume Information", ".Spotlight-V100", ".Trashes",
+                                      ".fseventsd",                ".DS_Store",       ".TemporaryItems"};
+  for (const char* j : kJunk)
+    if (strcmp(name, j) == 0) return true;
+  return name[0] == '.' && name[1] == '_';  // AppleDouble "._" sidecar files
+}
+
 // True if the file is a type one of the readers can open.
 bool isReadableFile(const std::string& name) {
   std::string_view v{name};
@@ -62,7 +72,7 @@ void FileBrowserActivity::loadFiles() {
 
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(fileNameBuffer.get(), NAME_BUFFER_SIZE);
-    if (strcmp(fileNameBuffer.get(), "System Volume Information") == 0) continue;
+    if (isJunkEntry(fileNameBuffer.get())) continue;  // OS cruft, never shown
     // AllFiles is the general SD browser, so it shows dot-folders (e.g. /.radioink
     // holding the audit captures); the book modes hide them unless opted in.
     if (fileNameBuffer[0] == '.' && mode != Mode::AllFiles && !SETTINGS.showHiddenFiles) {

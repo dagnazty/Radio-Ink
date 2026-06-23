@@ -7,8 +7,9 @@ toolkit**, a custom **hacker-hiphop theme**, and a serial-driven **dev rig** tha
 drive and screenshot the device over USB.
 
 - **Author:** dag nazty — <https://dagnazty.dev>
-- **Version:** `1.3.0` base (`RADIOINK_VERSION` adds branch + short SHA; shown on the boot screen,
-  Settings header, and **Radio Ink → About**).
+- **Version:** tracked as `[radioink] version` in `platformio.ini` (currently **1.1.1**) with history in
+  [CHANGELOG.md](./CHANGELOG.md); `RADIOINK_VERSION` adds branch + short SHA, shown on the boot screen,
+  the Settings header, and the **Home → About** screen.
 - **Built on:** CrossPoint Reader by Dave Allie & community (MIT); originally inspired by atomic14's
   [diy-esp32-epub-reader](https://github.com/atomic14/diy-esp32-epub-reader). See [Credits](#10-credits--license).
 - ⚠️ **Authorized testing only.** Transmitting/attack features are compiled out of release builds and
@@ -90,8 +91,8 @@ case to extend). Categories:
 | **Results** | Audit Findings · View WiFi results · View BLE results · Camera Sweep |
 | **Export** | Save text / CSV / JSON / WiGLE |
 
-The on-device file browser and About screen moved to the Home menu (one unified browser; About is its
-own screen) — see §4a/§4b. Vendor lookups use a full IEEE OUI table on the SD card at
+The on-device file browser and About screen now live on the Home menu (one unified browser; About is
+its own screen). Vendor lookups use a full IEEE OUI table on the SD card at
 `/.radioink/oui.bin` (built by `scripts/gen_oui.py`); without it, lookups fall back to a small
 hardcoded set.
 

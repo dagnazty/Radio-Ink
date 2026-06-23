@@ -33,3 +33,4 @@ data/oui/oui.bin
 
 # Generated sample/converted movies (build with scripts/gen_video.py)
 data/movies/*.rivid
+/ignore

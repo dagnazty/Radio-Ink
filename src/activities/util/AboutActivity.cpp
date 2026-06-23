@@ -1,6 +1,10 @@
 #include "AboutActivity.h"
 
+#include <Arduino.h>
 #include <GfxRenderer.h>
+#include <HalGPIO.h>
+
+#include <cstdio>
 
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
@@ -42,7 +46,12 @@ void AboutActivity::render(RenderLock&&) {
   line("https://dagnazty.dev", SMALL_FONT_ID, false, 12);
   line("RF audit / pentest firmware", SMALL_FONT_ID);
   line("for the Xteink X-series (ESP32-C3).", SMALL_FONT_ID);
-  line("Authorized testing only.", SMALL_FONT_ID);
+  line("Authorized testing only.", SMALL_FONT_ID, false, 12);
+
+  char diag[48];
+  snprintf(diag, sizeof(diag), "Device: %s   Free heap: %u KB", gpio.deviceIsX3() ? "X3" : "X4",
+           static_cast<unsigned>(ESP.getFreeHeap() / 1024));
+  line(diag, SMALL_FONT_ID);
 
   const auto labels = mappedInput.mapLabels("Back", "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

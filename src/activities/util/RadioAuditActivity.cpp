@@ -2202,6 +2202,14 @@ void RadioAuditActivity::buildCameraTargets() {
     t.rssi = b.rssi;
     cameraTargets.push_back(std::move(t));
   }
+
+  // Rank: confident vendor/OUI hits first, low-confidence "Randomized MAC"
+  // candidates last; stronger signal first within each tier.
+  auto confident = [](const CameraTarget& t) { return t.reason.find("Randomized") == std::string::npos; };
+  std::sort(cameraTargets.begin(), cameraTargets.end(), [&](const CameraTarget& a, const CameraTarget& b) {
+    if (confident(a) != confident(b)) return confident(a);
+    return a.rssi > b.rssi;
+  });
 }
 
 void RadioAuditActivity::showCameraSweep() {

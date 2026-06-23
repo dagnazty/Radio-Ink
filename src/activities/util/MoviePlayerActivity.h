@@ -36,10 +36,14 @@ class MoviePlayerActivity : public Activity {
   void loadMovieList();
   bool startPlayback(const std::string& name);
   void stopPlayback();           // close file, return to the list
-  void advanceFrame();           // step currentFrame on the fps timer
+  bool advanceFrame();           // step currentFrame on the fps timer; true if it advanced
+  void toggleAutoLoop();         // flip + persist the autoloop preference
   void renderList();
   void drawCurrentFrame();       // blit currentFrame scaled + centered
-  void renderMessage(const char* title, const char* line1, const char* line2);
+  void renderMessage(const char* title, const char* line1, const char* line2, const char* confirmLabel = "OK",
+                     bool showLoop = false);
+
+  bool autoLoop = false;  // when true, finished movies restart instead of stopping (persisted)
 
   State state = State::LIST;
   std::vector<std::string> movies;  // .rivid filenames in MOVIES_DIR

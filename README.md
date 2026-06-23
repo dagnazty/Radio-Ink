@@ -5,7 +5,7 @@
 
 Radio Ink keeps the **entire CrossPoint e-reader** — community-built, fully hackable, free forever —
 and adds a **Wi-Fi / BLE auditing toolkit** for authorized wireless security testing, a custom
-hacker-hiphop theme, and a serial dev rig. Everything CrossPoint does, Radio Ink still does; the
+theme, and a serial dev rig. Everything CrossPoint does, Radio Ink still does; the
 audit tool is bolted on top.
 
 Created and maintained by **dag nazty** — <https://dagnazty.dev>. Fork at
@@ -75,7 +75,8 @@ Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives 
 
 - **Movies (novelty)**: a monochrome flipbook player (Home → Movies) for 1-bit `.rivid` frame packs
   converted off-device with `scripts/gen_video.py`. It is **not** real video — the e-ink panel runs at a
-  few fps, monochrome, no audio — but it'll flip high-contrast clips you convert yourself.
+  few fps, monochrome, no audio — but it'll flip high-contrast clips you convert yourself. Pause/End has
+  an **autoloop** toggle that persists across reboots.
 
 - **Wireless workflows**:
 
@@ -189,6 +190,7 @@ output matches a local host build.
 ## Documentation
 
 - [RADIO_INK.md](./RADIO_INK.md) — Radio Ink technical reference (audit tool, dev rig, theme, internals)
+- [CHANGELOG.md](./CHANGELOG.md) — version history
 - [User Guide](./USER_GUIDE.md)
 - [Web server usage](./docs/webserver.md)
 - [Web server endpoints](./docs/webserver-endpoints.md)
