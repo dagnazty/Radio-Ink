@@ -84,13 +84,16 @@ case to extend). Categories:
 
 | Category | Items |
 |---|---|
-| **Recon** | Quick Scan · Deep Scan · WiFi Scan · BLE Scan · Client Recon (probes) · Channel usage · Tracker Sweep |
+| **Recon** | Quick Scan · Deep Scan · WiFi Scan · BLE Scan · Client Recon (probes) · Channel usage · Tracker Sweep · Deauth Detector |
 | **Capture** | Live PCAP capture · Handshake / PMKID |
-| **Attacks** ⚠ *(dev builds only)* | Deauth (all APs) · Deauth selected · Beacon flood · Evil Twin / Portal · BLE Spoof |
-| **Files** | Browse SD files |
+| **Attacks** ⚠ *(dev builds only)* | Deauth (all APs) · Deauth selected · Beacon flood · Evil Twin / Portal · BLE Spoof · Karma / Probe Resp |
 | **Results** | Audit Findings · View WiFi results · View BLE results · Camera Sweep |
-| **Export** | Save text / CSV / JSON |
-| **About** | Version + credits |
+| **Export** | Save text / CSV / JSON / WiGLE |
+
+The on-device file browser and About screen moved to the Home menu (one unified browser; About is its
+own screen) — see §4a/§4b. Vendor lookups use a full IEEE OUI table on the SD card at
+`/.radioink/oui.bin` (built by `scripts/gen_oui.py`); without it, lookups fall back to a small
+hardcoded set.
 
 ### Recon (passive)
 - **Quick/Deep Scan** — multi-pass WiFi (`WiFi.scanNetworks`) + BLE (active, WiFi off first to avoid
@@ -104,6 +107,8 @@ case to extend). Categories:
     services/characteristics (R/W/N/I).
 - **Client Recon** — channel-hops 1–13 capturing **probe requests** (client MACs + searched SSIDs).
 - **Tracker Sweep** — active BLE scan flagging **AirTag/FindMy, Tile, Samsung SmartTag, Chipolo**.
+- **Deauth Detector** — passive promiscuous monitor that tallies deauth/disassoc frames per source MAC
+  and flags floods (logs the offending source to `/.radioink/captures/deauth-*.txt`).
 
 ### Capture (→ SD)
 - **Live PCAP** — promiscuous frames streamed to `/.radioink/captures/*.pcap` (LINKTYPE_IEEE802_11)
@@ -120,17 +125,25 @@ to override the IDF's `ieee80211_raw_frame_sanity_check` for raw TX.
 - **Beacon flood** — random SSIDs across channels.
 - **Evil Twin / Portal** — open rogue AP cloning a chosen SSID + DNS captive portal + credential
   page → `/.radioink/loot/`. (`EvilTwinActivity`, also compiled out of release.)
+- **Karma / Probe Resp** — harvests the SSIDs clients probe for and beacons that PNL back to elicit
+  association.
 - **BLE Spoof** — floods phantom BLE advertisers.
+- **Camera Deauth** — from a Camera Sweep hit: directed deauth of that client off its AP (`AttackMode::
+  CameraDeauth`), using the AP BSSID + channel captured during the sweep.
 
 ### Analysis & output
 - **Audit findings** — WPS, missing PMF, open/WEP, duplicate-SSID/rogue-AP, deauth activity,
   possible tracker, etc. Selectable → jump to the related target's deep scan.
-- **Camera Sweep** — runs a fresh WiFi AP scan + **associated-client OUI capture** + active BLE, then
-  fingerprints likely cameras (camera SSIDs/names, Amazon = Ring/Blink clients, Hikvision/Dahua/Axis).
-- **Intelligence** — OUI→vendor lookup, BLE advert decode (iBeacon/Eddystone/Apple Continuity),
-  `watchlist.txt` matching, scan-to-scan **NEW/GONE** diff, channel-usage map, RSSI **locator**.
-- **Files browser** — list/delete everything under `/.radioink/` on-device.
-- **Reports** — TXT / CSV / JSON under `/.radioink/`, RTC-stamped.
+- **Camera Sweep** — fresh WiFi AP scan + **associated-client OUI capture** (with each client's AP
+  BSSID + channel) + active BLE, then fingerprints likely cameras: camera SSIDs/names, **Ring/Blink**
+  (hardcoded OUIs **and** privacy-randomized-MAC candidates), Hikvision/Dahua/Axis/Wyze/Reolink/etc.
+  Results are an **interactive list** — select a camera to **Locate** (RSSI "warmer/colder") or
+  **Deauth** it (directed, dev builds). Vendor names need `/.radioink/oui.bin` (see §4).
+- **Intelligence** — OUI→vendor lookup (SD database), BLE advert decode (iBeacon/Eddystone/Apple
+  Continuity), `watchlist.txt` matching, scan-to-scan **NEW/GONE** diff, channel-usage map, RSSI
+  **locator**.
+- **Reports** — TXT / CSV / JSON, plus **WiGLE-1.4 CSV** for wardriving (no on-board GPS — drop a
+  `location.txt` with `lat,lon` on the SD to tag rows), all RTC-stamped under `/.radioink/`.
 
 ### SD layout
 ```

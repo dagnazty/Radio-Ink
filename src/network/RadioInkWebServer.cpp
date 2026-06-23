@@ -373,7 +373,8 @@ void RadioInkWebServer::handleStatus() const {
   server->send(200, "application/json", json);
 }
 
-void RadioInkWebServer::scanFiles(const char* path, const std::function<void(FileInfo)>& callback) const {
+void RadioInkWebServer::scanFiles(const char* path, const std::function<void(FileInfo)>& callback,
+                                  bool includeHidden) const {
   HalFile root = Storage.open(path);
   if (!root) {
     LOG_DBG("WEB", "Failed to open directory: %s", path);
@@ -394,8 +395,9 @@ void RadioInkWebServer::scanFiles(const char* path, const std::function<void(Fil
     file.getName(name, sizeof(name));
     auto fileName = String(name);
 
-    // Skip hidden items (starting with ".")
-    bool shouldHide = !SETTINGS.showHiddenFiles && fileName.startsWith(".");
+    // Skip hidden items (starting with ".") unless the device setting or the
+    // per-request "show hidden" toggle (web file manager checkbox) is on.
+    bool shouldHide = !(includeHidden || SETTINGS.showHiddenFiles) && fileName.startsWith(".");
 
     // Check against explicitly hidden items list
     if (!shouldHide) {
@@ -452,6 +454,10 @@ void RadioInkWebServer::handleFileListData() const {
     }
   }
 
+  // Optional per-request override to reveal dot-prefixed items (e.g. /.radioink)
+  // without changing the device-wide showHiddenFiles setting.
+  const bool includeHidden = server->hasArg("showHidden") && server->arg("showHidden") == "1";
+
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
   server->sendContent("[");
@@ -460,7 +466,9 @@ void RadioInkWebServer::handleFileListData() const {
   bool seenFirst = false;
   JsonDocument doc;
 
-  scanFiles(currentPath.c_str(), [this, &output, &doc, seenFirst](const FileInfo& info) mutable {
+  scanFiles(
+      currentPath.c_str(),
+      [this, &output, &doc, seenFirst](const FileInfo& info) mutable {
     doc.clear();
     doc["name"] = info.name;
     doc["size"] = info.size;
@@ -480,7 +488,8 @@ void RadioInkWebServer::handleFileListData() const {
       seenFirst = true;
     }
     server->sendContent(output);
-  });
+      },
+      includeHidden);
   server->sendContent("]");
   // End of streamed response, empty chunk to signal client
   server->sendContent("");

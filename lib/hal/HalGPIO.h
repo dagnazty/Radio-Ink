@@ -29,8 +29,12 @@
 #define BQ27220_VOLT_REG 0x08  // Voltage() command code (mV)
 
 // Analog DS3231 RTC I2C
-#define I2C_ADDR_DS3231 0x68  // RTC I2C address
-#define DS3231_SEC_REG 0x00   // Seconds command code (BCD)
+#define I2C_ADDR_DS3231 0x68     // RTC I2C address
+#define DS3231_SEC_REG 0x00      // Seconds command code (BCD)
+#define DS3231_CONTROL_REG 0x0E  // Control: bit7 EOSC (active-low osc enable)
+#define DS3231_STATUS_REG 0x0F   // Status: bit7 OSF (oscillator-stopped flag)
+#define DS3231_EOSC_BIT 0x80     // Control bit7: when set, osc stops on VBAT
+#define DS3231_OSF_BIT 0x80      // Status bit7: oscillator has stopped (time lost)
 
 // QST QMI8658 IMU I2C
 #define I2C_ADDR_QMI8658 0x6B        // IMU I2C address

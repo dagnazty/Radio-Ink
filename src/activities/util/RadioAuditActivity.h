@@ -33,15 +33,18 @@ class RadioAuditActivity final : public Activity {
     ExportText,
     ExportCsv,
     ExportJson,
+    ExportWigle,
     CapturePcap,
-    BrowseFiles,
     CaptureHandshake,
     DeauthAttack,
     DeauthSelected,
     BeaconFlood,
     EvilTwin,
     TrackerSweep,
+    DeauthDetector,
     BleSpoof,
+    Karma,
+    DeauthCameras,
     About,
     COUNT,
   };
@@ -49,8 +52,8 @@ class RadioAuditActivity final : public Activity {
  private:
   enum class State { IDLE, WIFI_SCANNING, BLE_SCANNING, CAPTURING, ATTACKING, DONE, SAVED, ERROR };
   enum class ScanScope { Both, WifiOnly, BleOnly };
-  enum class CaptureMode { Pcap, Handshake };
-  enum class AttackMode { Deauth, Beacon, BleSpoof };
+  enum class CaptureMode { Pcap, Handshake, DeauthDetect };
+  enum class AttackMode { Deauth, Beacon, BleSpoof, Karma, CameraDeauth };
 
   struct WifiFinding {
     std::string ssid;
@@ -92,6 +95,22 @@ class RadioAuditActivity final : public Activity {
   struct ProbeEntry {
     std::string client;
     std::string ssid;
+    std::string apBssid;  // for camera-sweep clients: the AP they're associated to
+    int rssi = 0;
+    int channel = 0;  // channel the station was heard on (camera sweep)
+  };
+
+  // A camera hit from the sweep, selectable for Locate / Deauth.
+  struct CameraTarget {
+    enum class Kind { WifiAp, Client, Ble };
+    Kind kind = Kind::Client;
+    std::string mac;      // AP BSSID / client MAC / BLE address
+    std::string label;    // SSID or device name
+    std::string reason;   // why it was flagged
+    uint8_t macBytes[6] = {};
+    uint8_t apBytes[6] = {};  // for clients: the AP they're associated to (directed deauth)
+    bool hasAp = false;
+    int channel = 0;
     int rssi = 0;
   };
 
@@ -109,7 +128,17 @@ class RadioAuditActivity final : public Activity {
   bool showingBleDetails = false;
   bool showingFindings = false;
   bool showingTarget = false;
-  bool targetFromList = false;  // true if the detail view was opened from a results list
+  bool showingCameraList = false;  // selectable list of camera hits from the sweep
+  bool targetFromList = false;     // true if the detail view was opened from a results list
+  bool targetFromCameraList = false;  // detail was opened from the camera list (Back returns there)
+  std::vector<CameraTarget> cameraTargets;
+  int cameraSel = 0;
+  // Camera target currently in the detail view (for directed deauth).
+  bool targetIsCamera = false;
+  bool targetCamHasAp = false;
+  uint8_t targetCamMac[6] = {};
+  uint8_t targetCamAp[6] = {};
+  int targetCamChannel = 0;
   bool deepScanMode = false;
   ScanScope scanScope = ScanScope::Both;
   int targetScroll = 0;
@@ -153,6 +182,7 @@ class RadioAuditActivity final : public Activity {
   uint32_t captureBytesWritten = 0;
   int hsPmkidCount = 0;  // PMKID lines written to the .22000 this session
   int hsEapolCount = 0;  // EAPOL (M1+M2) lines written this session
+  int ddAlertCount = 0;  // deauth-flood sources flagged this session
 
   // Active attack state (deauth / beacon flood).
   AttackMode attackMode = AttackMode::Deauth;
@@ -172,12 +202,6 @@ class RadioAuditActivity final : public Activity {
 
   // SD file browser for audit outputs (captures + reports under /.radioink).
   // Navigation is floored at the audit root; files are deletable, dirs descend.
-  bool showingFiles = false;
-  bool filesLockNextConfirm = false;  // swallow the Confirm release that opened the browser
-  std::string filesDir;
-  std::vector<std::string> fileEntries;  // names; directories end with '/'
-  std::vector<uint32_t> fileSizes;       // bytes (0 for directories)
-  int fileSelected = 0;
 
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   BLEScan* bleScan = nullptr;
@@ -207,6 +231,12 @@ class RadioAuditActivity final : public Activity {
   void showBleDetails();
   void startCameraSweep();  // run a fresh WiFi+BLE scan, then show camera clues
   void showCameraSweep();
+  void buildCameraTargets();  // collect camera hits into the selectable list
+  void renderCameraList();
+  void openCameraDetail(int idx);  // detail + Locate/Deauth for the picked camera
+#if defined(RADIO_AUDIT_ENABLE_ACTIVE)
+  void startCameraDeauth();  // directed deauth of the selected camera off its AP
+#endif
   void showAbout();  // credits + version page
   void startTrackerSweep();  // active BLE scan, then list AirTag/Tile/SmartTag trackers
 #if defined(RADIO_AUDIT_ENABLE_BLE)
@@ -222,6 +252,10 @@ class RadioAuditActivity final : public Activity {
   void stopHandshakeCapture();
   void processHandshakes();
   void renderHandshake();
+  void startDeauthDetect();    // passive deauth/disassoc flood monitor
+  void stopDeauthDetect();
+  void processDeauthDetect();  // write alert lines for sources over threshold
+  void renderDeauthDetect();
   void openTargetMenu();              // build + show the deep-scan action menu
   std::string targetMenuLabel(int code) const;
   void runTargetMenuItem(int code);
@@ -233,15 +267,14 @@ class RadioAuditActivity final : public Activity {
   void beginDeauth(std::vector<int> targets, const std::string& label);  // focused/grouped/all deauth
   void startDeauthAttack();    // all visible APs
   void startDeauthSelected();  // only APs marked in the WiFi results list
+  void startDeauthCameras();   // only APs fingerprinted as cameras (Flock etc.)
   void startBeaconFlood();
   void startEvilTwin();        // rogue AP + captive portal (launches EvilTwinActivity)
   void startBleSpoof();        // flood the air with phantom BLE advertisements
+  void startKarma();           // harvest probe-request PNLs + beacon them back
   void stopAttack();
   void renderAttack();
 #endif
-  void startFilesBrowser();
-  void loadFilesList();
-  void renderFiles();
   void runAction(Action action);
   void showChannelUsage();
   void loadWatchlist();
@@ -253,11 +286,13 @@ class RadioAuditActivity final : public Activity {
   void exportText();
   void exportCsv();
   void exportJson();
+  void exportWigle();
   bool saveFile(const char* path, const String& content);
   String makeTimestampedPath(const char* ext) const;
   String makeTextReport() const;
   String makeCsvReport() const;
   String makeJsonReport() const;
+  String makeWigleReport() const;
   String makeRiskSummary() const;
   String scanModeName() const;
   static std::string authName(wifi_auth_mode_t auth);

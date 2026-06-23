@@ -43,7 +43,11 @@ class HomeActivity final : public Activity {
     ++i;
     if (item == HomeMenuItem::RADIO_AUDIT) return i;
     ++i;
+    if (item == HomeMenuItem::MOVIES) return i;
+    ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
+    ++i;
+    if (item == HomeMenuItem::ABOUT) return i;
     return 0;
   }
 
@@ -55,7 +59,9 @@ class HomeActivity final : public Activity {
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i++) return HomeMenuItem::RADIO_AUDIT;
-    if (idx == i) return HomeMenuItem::SETTINGS_MENU;
+    if (idx == i++) return HomeMenuItem::MOVIES;
+    if (idx == i++) return HomeMenuItem::SETTINGS_MENU;
+    if (idx == i) return HomeMenuItem::ABOUT;
     return HomeMenuItem::NONE;
   }
   void onSelectBook(const std::string& path);
@@ -64,6 +70,8 @@ class HomeActivity final : public Activity {
   void onSettingsOpen();
   void onFileTransferOpen();
   void onRadioAuditOpen();
+  void onMoviesOpen();
+  void onAboutOpen();
   void onOpdsBrowserOpen();
 
   int getMenuItemCount() const;

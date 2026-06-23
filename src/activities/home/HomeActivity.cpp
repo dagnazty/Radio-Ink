@@ -18,10 +18,11 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "images/RadioInkSkull.h"  // RADIOINK_SKULL_WIDTH: reserve the logo's corner in the menu
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 5;  // File Browser, Recents, File transfer, Radio Ink, Settings
+  int count = 7;  // File Browser, Recents, File transfer, Radio Ink, Movies, Settings, About
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -200,8 +201,14 @@ void HomeActivity::loop() {
         case HomeMenuItem::RADIO_AUDIT:
           onRadioAuditOpen();
           break;
+        case HomeMenuItem::MOVIES:
+          onMoviesOpen();
+          break;
         case HomeMenuItem::SETTINGS_MENU:
           onSettingsOpen();
+          break;
+        case HomeMenuItem::ABOUT:
+          onAboutOpen();
           break;
         default:
           break;
@@ -240,8 +247,8 @@ void HomeActivity::render(RenderLock&&) {
 
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                        "Radio Ink", tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Wifi, Settings};
+                                        "Radio Ink", "Movies", tr(STR_SETTINGS_TITLE), "About"};
+  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Wifi, Image, Settings, Text};
 
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
@@ -256,8 +263,11 @@ void HomeActivity::render(RenderLock&&) {
 
   const int menuY = coverY + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
   const int menuHeight = pageHeight - menuY - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  // Reserve the bottom-right corner for the skull logo so the selection bar of a
+  // bottom menu row (e.g. Settings) stops before it instead of colliding.
+  const int menuWidth = pageWidth - RADIOINK_SKULL_WIDTH;
   GUI.drawButtonMenu(
-      renderer, Rect{0, menuY, pageWidth, menuHeight}, static_cast<int>(menuItems.size()),
+      renderer, Rect{0, menuY, menuWidth, menuHeight}, static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - recentBooks.size(),
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });
@@ -279,7 +289,7 @@ void HomeActivity::render(RenderLock&&) {
 
 void HomeActivity::onSelectBook(const std::string& path) { activityManager.goToReader(path); }
 
-void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }
+void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser("/", /*allFiles=*/true); }
 
 void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
 
@@ -288,5 +298,9 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onRadioAuditOpen() { activityManager.goToRadioAudit(); }
+
+void HomeActivity::onMoviesOpen() { activityManager.goToMovies(); }
+
+void HomeActivity::onAboutOpen() { activityManager.goToAbout(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }

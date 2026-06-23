@@ -21,6 +21,9 @@ void RadioInkTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, con
   const ThemeMetrics& m = UITheme::getInstance().getMetrics();
   const int x = renderer.getScreenWidth() - RADIOINK_SKULL_WIDTH - m.contentSidePadding / 2;
   const int y = renderer.getScreenHeight() - m.buttonHintsHeight - m.verticalSpacing - RADIOINK_SKULL_HEIGHT;
+  // White backing behind the logo so a selected menu row's inverted block can't
+  // bleed through the ink-only skull and distort its shape.
+  renderer.fillRect(x, y, RADIOINK_SKULL_WIDTH, RADIOINK_SKULL_HEIGHT, false);
   renderer.drawImage(RadioInkSkull, x, y, RADIOINK_SKULL_WIDTH, RADIOINK_SKULL_HEIGHT);
 }
 
@@ -70,8 +73,22 @@ void RadioInkTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonC
                                    const std::function<UIIcon(int index)>& /*rowIcon*/) const {
   const ThemeMetrics& m = LyraMetrics::values;
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  for (int i = 0; i < buttonCount; ++i) {
-    const int rowY = rect.y + i * (m.menuRowHeight + m.menuSpacing);
+  const int rowStride = m.menuRowHeight + m.menuSpacing;
+
+  // Scroll the window so the selected row stays on screen when the list is taller
+  // than the rect (e.g. the home menu once it grew past what fits).
+  int visible = rowStride > 0 ? rect.height / rowStride : buttonCount;
+  if (visible < 1) visible = 1;
+  int first = 0;
+  if (buttonCount > visible) {
+    if (selectedIndex >= visible) first = selectedIndex - visible + 1;
+    if (first > buttonCount - visible) first = buttonCount - visible;
+    if (first < 0) first = 0;
+  }
+  const int last = (first + visible < buttonCount) ? first + visible : buttonCount;
+
+  for (int i = first; i < last; ++i) {
+    const int rowY = rect.y + (i - first) * rowStride;
     const int rowX = rect.x + m.contentSidePadding;
     const int rowW = rect.width - m.contentSidePadding * 2;
     const bool selected = (selectedIndex == i);

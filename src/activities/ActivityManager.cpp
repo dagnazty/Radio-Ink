@@ -18,6 +18,8 @@
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
 #include "util/FullScreenMessageActivity.h"
+#include "util/AboutActivity.h"
+#include "util/MoviePlayerActivity.h"
 #include "util/RadioAuditActivity.h"
 
 void ActivityManager::begin() {
@@ -176,8 +178,10 @@ void ActivityManager::goToFileTransfer() {
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
-void ActivityManager::goToFileBrowser(std::string path) {
-  replaceActivity(std::make_unique<FileBrowserActivity>(renderer, mappedInput, std::move(path)));
+void ActivityManager::goToFileBrowser(std::string path, bool allFiles) {
+  replaceActivity(std::make_unique<FileBrowserActivity>(
+      renderer, mappedInput, std::move(path),
+      allFiles ? FileBrowserActivity::Mode::AllFiles : FileBrowserActivity::Mode::Books));
 }
 
 void ActivityManager::goToRecentBooks() {
@@ -196,6 +200,14 @@ void ActivityManager::goToBrowser() {
 
 void ActivityManager::goToRadioAudit() {
   replaceActivity(std::make_unique<RadioAuditActivity>(renderer, mappedInput));
+}
+
+void ActivityManager::goToMovies() {
+  replaceActivity(std::make_unique<MoviePlayerActivity>(renderer, mappedInput));
+}
+
+void ActivityManager::goToAbout() {
+  replaceActivity(std::make_unique<AboutActivity>(renderer, mappedInput));
 }
 
 void ActivityManager::goToReader(std::string path) {

@@ -34,18 +34,26 @@ Created and maintained by **dag nazty** — <https://dagnazty.dev>. Fork at
 Reachable from **Home → Radio Ink**, grouped into menu categories:
 
 - **Recon** — Quick / Deep Wi-Fi + BLE scans, client recon (probe-request harvesting), channel-usage
-  map, and a **Tracker Sweep** that flags AirTag / FindMy / Tile / Samsung SmartTag / Chipolo tags.
+  map, a **Tracker Sweep** that flags AirTag / FindMy / Tile / Samsung SmartTag / Chipolo tags, and a
+  passive **Deauth Detector** that flags deauth/disassoc floods and the source MAC.
 - **Capture** — **Live PCAP** streamed to SD (open in Wireshark) and **WPA handshake / PMKID** capture
   exported in **hashcat `22000`** format.
-- **Attacks** *(dev builds only, authorization-gated)* — targeted / grouped / all **deauth**, **beacon
-  flood**, **evil-twin captive portal** with credential capture, and **BLE advertisement spoof**.
-- **Files** — on-device browser for everything under `/.radioink/`.
-- **Results** — audit findings (WPS / missing PMF / open / WEP / rogue-AP / deauth activity), Wi-Fi
-  and BLE result lists, and a **Camera Sweep** (Wi-Fi/BLE + associated-client OUI fingerprinting for
-  IP cameras, Ring/Blink, doorbells, NVRs).
-- **Export** — TXT / CSV / JSON reports, RTC-stamped, written to SD.
+- **Attacks** *(dev builds only, authorization-gated)* — targeted / grouped / all **deauth** (including
+  directed deauth of a selected camera), **beacon flood**, **evil-twin captive portal** with credential
+  capture, **Karma / probe-response**, and **BLE advertisement spoof**.
+- **Results** — audit findings (WPS / missing PMF / open / WEP / rogue-AP / deauth activity), Wi-Fi and
+  BLE result lists, and an **interactive Camera Sweep**: Wi-Fi/BLE + associated-client OUI fingerprinting
+  for IP cameras, **Ring / Blink** (hardcoded OUIs, plus randomized-MAC candidates), doorbells and NVRs —
+  select a hit to **Locate** or **Deauth** it.
+- **Export** — TXT / CSV / JSON reports plus **WiGLE-1.4 CSV** for wardriving, all RTC-stamped to SD.
+  (No on-board GPS: drop a `location.txt` with `lat,lon` on the SD to tag WiGLE rows.)
 - Plus, from any deep-scan detail: **GATT enumerate**, an **RSSI locator** ("warmer/colder"), vendor
   lookup, BLE-advert decoding, a MAC **watchlist**, and **scan-to-scan diff** (NEW / GONE devices).
+
+**Vendor database (SD):** the full IEEE OUI table (~39,500 vendors) lives on the SD card at
+`/.radioink/oui.bin` (built by `scripts/gen_oui.py`). Copy it there to get vendor names across scans,
+Camera Sweep, and exports — without it, MAC lookups (including Ring/Blink) fall back to the small
+hardcoded set.
 
 Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives under `/.radioink/`.
 
@@ -61,7 +69,13 @@ Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives 
 
 - **Tilt page turn (X3 only)**.
 
-- **Library workflow**: folder browser, hidden-file toggle, long-press delete, recent books, SD-cache management.
+- **Library workflow**: one unified file browser (from Home → Browse Files) that lists every file with
+  sizes, shows `/.radioink/` and other dot-folders, opens books, and deletes anything via long-press;
+  plus recent books and SD-cache management.
+
+- **Movies (novelty)**: a monochrome flipbook player (Home → Movies) for 1-bit `.rivid` frame packs
+  converted off-device with `scripts/gen_video.py`. It is **not** real video — the e-ink panel runs at a
+  few fps, monochrome, no audio — but it'll flip high-contrast clips you convert yourself.
 
 - **Wireless workflows**:
 

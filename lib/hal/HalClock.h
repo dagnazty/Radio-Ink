@@ -10,6 +10,7 @@ extern HalClock halClock;  // Singleton
 
 class HalClock {
   bool _available = false;
+  bool _timeValid = false;  // false if the DS3231 reported a stopped oscillator (OSF)
   mutable uint8_t _cachedHour = 0;
   mutable uint8_t _cachedMinute = 0;
   mutable bool _hasCachedTime = false;
@@ -23,6 +24,11 @@ class HalClock {
 
   // True if the DS3231 RTC is present on this device
   bool isAvailable() const { return _available; }
+
+  // False if the RTC's oscillator had stopped (OSF) since it was last set, e.g.
+  // after a dead/removed backup battery -- the held time is then meaningless and
+  // the user should re-sync. Cleared once a fresh time is written.
+  bool isTimeValid() const { return _timeValid; }
 
   // Get current hour (0-23) and minute (0-59).
   // Returns false if RTC is not available.
@@ -45,4 +51,11 @@ class HalClock {
 
  private:
   bool writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second);
+
+  // Single-register DS3231 access helpers.
+  bool readRegister(uint8_t reg, uint8_t& value) const;
+  bool writeRegister(uint8_t reg, uint8_t value) const;
+  // Clear EOSC so the oscillator keeps running on the backup battery, and read
+  // the OSF flag to detect a previously-stopped oscillator (sets _timeValid).
+  void ensureOscillatorKeepsTime();
 };

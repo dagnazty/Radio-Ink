@@ -18,10 +18,30 @@
 namespace {
 constexpr unsigned long GO_HOME_MS = 1000;
 constexpr size_t NAME_BUFFER_SIZE = 500;
+
+// Compact human-readable byte count for the AllFiles size column.
+std::string humanFileSize(uint32_t bytes) {
+  char buf[16];
+  if (bytes < 1024)
+    snprintf(buf, sizeof(buf), "%uB", static_cast<unsigned>(bytes));
+  else if (bytes < 1024u * 1024u)
+    snprintf(buf, sizeof(buf), "%.1fK", bytes / 1024.0);
+  else
+    snprintf(buf, sizeof(buf), "%.1fM", bytes / (1024.0 * 1024.0));
+  return std::string(buf);
+}
+
+// True if the file is a type one of the readers can open.
+bool isReadableFile(const std::string& name) {
+  std::string_view v{name};
+  return FsHelpers::hasEpubExtension(v) || FsHelpers::hasXtcExtension(v) || FsHelpers::hasTxtExtension(v) ||
+         FsHelpers::hasMarkdownExtension(v) || FsHelpers::hasBmpExtension(v);
+}
 }  // namespace
 
 void FileBrowserActivity::loadFiles() {
   files.clear();
+  fileSizes.clear();
 
   auto root = Storage.open(basepath.c_str());
   if (!root || !root.isDirectory()) {
@@ -36,18 +56,29 @@ void FileBrowserActivity::loadFiles() {
     return;
   }
 
+  // AllFiles mode shows every entry with its size; names and sizes must stay
+  // aligned through the sort, so collect pairs and sort them together.
+  std::vector<std::pair<std::string, uint32_t>> allEntries;
+
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(fileNameBuffer.get(), NAME_BUFFER_SIZE);
-    if ((!SETTINGS.showHiddenFiles && fileNameBuffer[0] == '.') ||
-        strcmp(fileNameBuffer.get(), "System Volume Information") == 0) {
+    if (strcmp(fileNameBuffer.get(), "System Volume Information") == 0) continue;
+    // AllFiles is the general SD browser, so it shows dot-folders (e.g. /.radioink
+    // holding the audit captures); the book modes hide them unless opted in.
+    if (fileNameBuffer[0] == '.' && mode != Mode::AllFiles && !SETTINGS.showHiddenFiles) {
       continue;
     }
 
     if (file.isDirectory()) {
-      files.emplace_back(std::string(fileNameBuffer.get()) + "/");
+      if (mode == Mode::AllFiles)
+        allEntries.push_back({std::string(fileNameBuffer.get()) + "/", 0});
+      else
+        files.emplace_back(std::string(fileNameBuffer.get()) + "/");
     } else {
       std::string_view filename{fileNameBuffer.get()};
-      if (mode == Mode::PickFirmware) {
+      if (mode == Mode::AllFiles) {
+        allEntries.push_back({std::string(filename), static_cast<uint32_t>(file.fileSize())});
+      } else if (mode == Mode::PickFirmware) {
         // Firmware picker: only show .bin files.
         if (FsHelpers::checkFileExtension(filename, ".bin")) {
           files.emplace_back(filename);
@@ -60,7 +91,22 @@ void FileBrowserActivity::loadFiles() {
     }
   }
   root.close();
-  FsHelpers::sortFileList(files);
+
+  if (mode == Mode::AllFiles) {
+    std::sort(allEntries.begin(), allEntries.end(), [](const auto& a, const auto& b) {
+      const bool ad = a.first.back() == '/', bd = b.first.back() == '/';
+      if (ad != bd) return ad;  // directories first
+      return a.first < b.first;
+    });
+    files.reserve(allEntries.size());
+    fileSizes.reserve(allEntries.size());
+    for (auto& e : allEntries) {
+      files.push_back(std::move(e.first));
+      fileSizes.push_back(e.second);
+    }
+  } else {
+    FsHelpers::sortFileList(files);
+  }
 }
 
 void FileBrowserActivity::onEnter() {
@@ -102,6 +148,7 @@ void FileBrowserActivity::onEnter() {
 void FileBrowserActivity::onExit() {
   Activity::onExit();
   files.clear();
+  fileSizes.clear();
   fileNameBuffer.reset();
 }
 
@@ -227,7 +274,7 @@ void FileBrowserActivity::loop() {
       return;
     }
 
-    if (mode == Mode::Books && mappedInput.getHeldTime() >= GO_HOME_MS) {
+    if ((mode == Mode::Books || mode == Mode::AllFiles) && mappedInput.getHeldTime() >= GO_HOME_MS) {
       // --- LONG PRESS ACTION: DELETE FILE OR DIRECTORY ---
       std::string cleanBasePath = basepath;
       if (cleanBasePath.back() != '/') cleanBasePath += "/";
@@ -268,6 +315,9 @@ void FileBrowserActivity::loop() {
         loadFiles();
         selectorIndex = 0;
         requestUpdate();
+      } else if (mode == Mode::AllFiles && !isReadableFile(entry)) {
+        // General browser: a non-readable file (capture, .rivid, etc.) has nothing
+        // to open in a reader -- leave it (it can still be deleted via long-press).
       } else {
         onSelectBook(basepath + entry);
       }
@@ -370,7 +420,15 @@ void FileBrowserActivity::render(RenderLock&&) {
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, files.size(), selectorIndex,
         [this](int index) { return getFileName(files[index]); }, nullptr,
         [this](int index) { return UITheme::getFileIcon(files[index]); },
-        [this](int index) { return getFileExtension(files[index]); }, false);
+        [this](int index) {
+          // AllFiles: show the size (or "dir"); other modes: the extension.
+          if (mode == Mode::AllFiles)
+            return files[index].back() == '/' ? std::string("dir")
+                   : index < static_cast<int>(fileSizes.size()) ? humanFileSize(fileSizes[index])
+                                                                 : std::string();
+          return getFileExtension(files[index]);
+        },
+        false);
   }
 
   // Full path display

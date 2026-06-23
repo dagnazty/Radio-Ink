@@ -970,6 +970,19 @@
       color: var(--label-color);
       font-size: 0.9em;
     }
+    .show-hidden-toggle {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--label-color);
+      font-size: 0.9em;
+      cursor: pointer;
+      user-select: none;
+    }
+    .show-hidden-toggle input {
+      cursor: pointer;
+    }
     #progress-container {
       display: none;
       margin-top: 10px;
@@ -1525,6 +1538,9 @@
   <div class="contents-header">
     <h2 class="contents-title">Contents</h2>
     <span class="summary-inline" id="folder-summary"></span>
+    <label class="show-hidden-toggle" title="Show dot-folders like /.radioink (captures, movies, loot, oui.bin)">
+      <input type="checkbox" id="show-hidden-checkbox"> Show hidden
+    </label>
   </div>
 
   <div id="file-table">
@@ -1882,9 +1898,24 @@
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)).toLocaleString() + ' ' + sizes[i];
   }
 
+  // Persisted "show hidden files" preference for the web file manager. Reveals
+  // dot-folders (e.g. /.radioink) that are hidden by default. Web-only; does not
+  // change the device's showHiddenFiles setting.
+  const showHidden = localStorage.getItem('riShowHidden') === '1';
+
   async function hydrate() {
     // Fetch CrossPoint version
     fetchVersion();
+
+    // Wire the "Show hidden" toggle: reflect the saved state and reload on change.
+    const showHiddenCheckbox = document.getElementById('show-hidden-checkbox');
+    if (showHiddenCheckbox) {
+      showHiddenCheckbox.checked = showHidden;
+      showHiddenCheckbox.addEventListener('change', function() {
+        localStorage.setItem('riShowHidden', this.checked ? '1' : '0');
+        location.reload();
+      });
+    }
 
     // Close modals when clicking overlay - call proper cleanup functions
     document.querySelectorAll('.modal-overlay').forEach(function(overlay) {
@@ -1920,7 +1951,8 @@
 
     let files = [];
     try {
-      const response = await fetch('/api/files?path=' + encodeURIComponent(currentPath) + '&_=' + Date.now());
+      const response = await fetch('/api/files?path=' + encodeURIComponent(currentPath) +
+                                   (showHidden ? '&showHidden=1' : '') + '&_=' + Date.now());
       if (!response.ok) {
         throw new Error('Failed to load files: ' + response.status + ' ' + response.statusText);
       }

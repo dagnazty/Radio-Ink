@@ -42,9 +42,59 @@ void HalClock::begin() {
   _available = true;
   LOG_INF("CLK", "DS3231 RTC found");
 
+  // Make sure the oscillator keeps ticking on the backup battery (clear EOSC)
+  // and learn whether it had stopped (OSF) -- the usual cause of "lost time
+  // after sleep / power-off" on a DS3231.
+  ensureOscillatorKeepsTime();
+
   // Prime the cache with an initial read
   uint8_t h, m;
   getTime(h, m);
+}
+
+bool HalClock::readRegister(uint8_t reg, uint8_t& value) const {
+  Wire.beginTransmission(I2C_ADDR_DS3231);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  Wire.requestFrom(I2C_ADDR_DS3231, (uint8_t)1);
+  if (Wire.available() < 1) return false;
+  value = Wire.read();
+  return true;
+}
+
+bool HalClock::writeRegister(uint8_t reg, uint8_t value) const {
+  Wire.beginTransmission(I2C_ADDR_DS3231);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+void HalClock::ensureOscillatorKeepsTime() {
+  // EOSC (control reg bit 7) is active-low: when set, the oscillator is disabled
+  // while running from VBAT, so the clock freezes on every power loss / deep
+  // sleep. Clear it so the DS3231 holds time like it should.
+  uint8_t control;
+  if (readRegister(DS3231_CONTROL_REG, control)) {
+    if (control & DS3231_EOSC_BIT) {
+      control &= ~DS3231_EOSC_BIT;
+      if (writeRegister(DS3231_CONTROL_REG, control))
+        LOG_INF("CLK", "DS3231 EOSC was set; enabled oscillator on backup battery");
+      else
+        LOG_ERR("CLK", "DS3231 failed to clear EOSC");
+    }
+  }
+
+  // OSF (status reg bit 7) latches whenever the oscillator has stopped (dead or
+  // missing coin cell, first power-up). If set, the held time is invalid -- flag
+  // it so the UI can prompt a re-sync. OSF is cleared when a fresh time is set.
+  uint8_t status;
+  if (readRegister(DS3231_STATUS_REG, status)) {
+    _timeValid = !(status & DS3231_OSF_BIT);
+    if (!_timeValid)
+      LOG_ERR("CLK", "DS3231 OSF set: oscillator had stopped (check backup battery); time invalid until re-synced");
+  } else {
+    _timeValid = true;  // can't read status; assume valid rather than nag
+  }
 }
 
 bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
@@ -102,6 +152,9 @@ bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
 
 bool HalClock::formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased, bool use12Hour) const {
   if (bufSize < (use12Hour ? 9u : 6u)) return false;
+  // If the oscillator had stopped (OSF), the held time is meaningless -- report
+  // failure so the UI shows nothing instead of a wrong time until a re-sync.
+  if (!_timeValid) return false;
   uint8_t h, m;
   if (!getTime(h, m)) return false;
 
@@ -140,6 +193,13 @@ bool HalClock::writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second) {
     LOG_ERR("CLK", "Failed to write time to DS3231");
     return false;
   }
+
+  // A fresh, valid time was set: clear the oscillator-stopped flag so OSF no
+  // longer reports the time as invalid.
+  uint8_t status;
+  if (readRegister(DS3231_STATUS_REG, status) && (status & DS3231_OSF_BIT))
+    writeRegister(DS3231_STATUS_REG, status & ~DS3231_OSF_BIT);
+  _timeValid = true;
 
   // Invalidate cache so next read fetches fresh data
   _lastPollMs = 0;

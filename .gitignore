@@ -27,3 +27,9 @@ lib/EpdFont/scripts/output/
 # Firmware images and legacy patch artifacts (build outputs)
 *-firmware.bin
 crosspoint-radio-*.patch
+
+# Generated SD-card OUI database (regenerate with scripts/gen_oui.py from oui.min.csv)
+data/oui/oui.bin
+
+# Generated sample/converted movies (build with scripts/gen_video.py)
+data/movies/*.rivid

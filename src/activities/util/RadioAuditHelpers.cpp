@@ -95,6 +95,13 @@ std::string cameraFingerprintReason(const std::string& label, const std::string&
     const char* reason;
   };
   static constexpr CameraToken tokens[] = {
+      // Flock Safety ALPR / surveillance fingerprints (SSID names seen in the field).
+      {"flock", "Flock Safety camera fingerprint"},
+      {"flocksafety", "Flock Safety camera fingerprint"},
+      {"flock safety", "Flock Safety camera fingerprint"},
+      {"fs ext battery", "Flock Safety external battery fingerprint"},
+      {"pigvision", "Flock Safety (Pigvision) fingerprint"},
+      {"penguin", "Flock Safety (Penguin) fingerprint"},
       {"camera", "name contains camera"},
       {"ipcam", "name contains ipcam"},
       {"ip cam", "name contains ip cam"},
@@ -143,55 +150,53 @@ std::string cameraFingerprintReason(const std::string& label, const std::string&
   return "";
 }
 
-// ---- Curated OUI -> vendor lookup (first 3 MAC octets) ----
-struct OuiEntry {
-  uint32_t oui;
-  const char* name;
-};
-const OuiEntry OUI_TABLE[] = {
-    // Espressif (ESP8266/ESP32 - very common in IoT)
-    {0x240AC4, "Espressif"}, {0x246F28, "Espressif"}, {0x30AEA4, "Espressif"}, {0x7C9EBD, "Espressif"},
-    {0x84CCA8, "Espressif"}, {0xA020A6, "Espressif"}, {0xAC67B2, "Espressif"}, {0xB4E62D, "Espressif"},
-    {0xC44F33, "Espressif"}, {0xD8A01D, "Espressif"}, {0xECFABC, "Espressif"}, {0x3C71BF, "Espressif"},
-    // Apple
-    {0xACBC32, "Apple"}, {0xDCA904, "Apple"}, {0xF01898, "Apple"}, {0x3C0754, "Apple"}, {0x88665A, "Apple"},
-    {0x001CB3, "Apple"}, {0x001EC2, "Apple"}, {0xF099BF, "Apple"},
-    // Raspberry Pi
-    {0xB827EB, "Raspberry Pi"}, {0xDCA632, "Raspberry Pi"}, {0xE45F01, "Raspberry Pi"}, {0x28CDC1, "Raspberry Pi"},
-    // Samsung
-    {0x0012FB, "Samsung"}, {0x5C0A5B, "Samsung"}, {0x8C7712, "Samsung"}, {0xAC5F3E, "Samsung"}, {0xC819F7, "Samsung"},
-    // Google / Nest
-    {0x3C5AB4, "Google"}, {0x94EB2C, "Google"}, {0xA47733, "Google"}, {0xF4F5E8, "Google"}, {0xD86C63, "Google"},
-    // Amazon
-    {0x0C47C9, "Amazon"}, {0x44650D, "Amazon"}, {0x6837E9, "Amazon"}, {0xF0272D, "Amazon"}, {0xFC65DE, "Amazon"},
-    // Intel
-    {0x001B21, "Intel"}, {0x3413E8, "Intel"}, {0x3CA9F4, "Intel"}, {0x7C7A91, "Intel"}, {0xA08869, "Intel"},
-    // TP-Link
-    {0x50C7BF, "TP-Link"}, {0x60A4B7, "TP-Link"}, {0xA42BB0, "TP-Link"}, {0xEC086B, "TP-Link"},
-    // Ubiquiti
-    {0x00156D, "Ubiquiti"}, {0x245A4C, "Ubiquiti"}, {0x7483C2, "Ubiquiti"}, {0xFCECDA, "Ubiquiti"},
-    // Camera/NVR vendors
-    {0x00408C, "Axis"}, {0x4419B6, "Hikvision"}, {0xBCAD28, "Hikvision"}, {0x3CE36B, "Dahua"},
-    // Netgear
-    {0x00146C, "Netgear"}, {0x20E52A, "Netgear"}, {0x9C3DCF, "Netgear"}, {0xA040A0, "Netgear"},
-    // Sonos
-    {0x000E58, "Sonos"}, {0x347E5C, "Sonos"}, {0x48A6B8, "Sonos"}, {0xB8E937, "Sonos"},
-    // Texas Instruments (BLE)
-    {0x00124B, "TI"}, {0x98072D, "TI"}, {0x546C0E, "TI"}, {0xA0E6F8, "TI"},
-    // Microsoft
-    {0x7C1E52, "Microsoft"}, {0xC83F26, "Microsoft"}, {0x281878, "Microsoft"},
-};
-
-// Returns a vendor name, "randomized" for locally-administered MACs, or "" if unknown.
-std::string macVendor(const std::string& mac) {
+// Camera vendor from the MAC OUI (first 3 octets). Catches cameras whose SSID is
+// hidden or renamed -- especially Flock Safety, whose registered OUIs are listed
+// here (ported from the C5-Midnight / sticks_and_stones Flock detectors). Returns
+// a reason string, or "" if the OUI isn't a known dedicated-camera prefix.
+std::string cameraMacReason(const std::string& mac) {
   unsigned int b0, b1, b2;
   if (sscanf(mac.c_str(), "%x:%x:%x", &b0, &b1, &b2) != 3) return "";
-  if (b0 & 0x02) return "randomized";  // locally administered -> likely a random MAC
   const uint32_t oui = (b0 << 16) | (b1 << 8) | b2;
-  for (const auto& e : OUI_TABLE)
-    if (e.oui == oui) return e.name;
+  struct OuiCam {
+    uint32_t oui;
+    const char* reason;
+  };
+  static constexpr OuiCam table[] = {
+      // Flock Safety ALPR / surveillance registered OUIs.
+      {0x588E81, "Flock Safety OUI"}, {0xEC1BBD, "Flock Safety OUI"}, {0x9035EA, "Flock Safety OUI"},
+      {0x040D84, "Flock Safety OUI"}, {0xF082C0, "Flock Safety OUI"}, {0x1C34F1, "Flock Safety OUI"},
+      {0x385B44, "Flock Safety OUI"}, {0x943469, "Flock Safety OUI"}, {0xB4E3F9, "Flock Safety OUI"},
+      {0x70C94E, "Flock Safety OUI"}, {0x3C9180, "Flock Safety OUI"}, {0xD8F3BC, "Flock Safety OUI"},
+      {0x803049, "Flock Safety OUI"}, {0x145AFC, "Flock Safety OUI"}, {0x744CA1, "Flock Safety OUI"},
+      {0x083A88, "Flock Safety OUI"}, {0x9C2F9D, "Flock Safety OUI"}, {0x940853, "Flock Safety OUI"},
+      {0xE4AAEA, "Flock Safety OUI"},
+      // High-confidence dedicated camera makers (SSID-agnostic).
+      {0x0018DD, "Hikvision OUI"}, {0x788B77, "Wyze OUI"}, {0x8C8590, "Reolink OUI"},
+      // Official "Blink by Amazon" OUIs (camera-dedicated, unlike shared Amazon OUIs).
+      {0x3CA070, "Blink OUI"}, {0x70AD43, "Blink OUI"}, {0x74AB93, "Blink OUI"},
+      // Ring OUIs (hardcoded like C5-Midnight so Ring is found with no SD OUI DB).
+      {0x501479, "Ring OUI"}, {0x086266, "Ring OUI"}, {0xB479A7, "Ring OUI"}, {0xDC4F22, "Ring OUI"},
+      {0xFCE998, "Ring OUI"}, {0x74427F, "Ring OUI"}, {0x48022A, "Ring OUI"}, {0xAC9FC3, "Ring OUI"},
+      {0x187F88, "Ring OUI"}, {0x343EA4, "Ring OUI"}, {0x54E019, "Ring OUI"}, {0x5C475E, "Ring OUI"},
+      {0x649A63, "Ring OUI"}, {0x90486C, "Ring OUI"}, {0x9C7613, "Ring OUI"}, {0xCC3BFB, "Ring OUI"},
+      {0xC4DBAD, "Ring OUI"}, {0x242BD6, "Ring OUI"},
+      // Blink-specific Amazon OUIs (cameras + sync modules).
+      {0x50DCE7, "Blink OUI"}, {0x6837E9, "Blink OUI"}, {0xA002DC, "Blink OUI"}, {0x38F73D, "Blink OUI"},
+      {0x34D270, "Blink OUI"}, {0x74C63B, "Blink OUI"}, {0x18742E, "Blink OUI"}, {0xFC65DE, "Blink OUI"},
+      // Shared Amazon OUIs (Ring/Blink among other Amazon gear -- lower confidence).
+      {0x4473D6, "Amazon OUI (Ring/Blink?)"}, {0xE0B94D, "Amazon OUI (Ring/Blink?)"},
+      {0xFCA183, "Amazon OUI (Ring/Blink?)"}, {0xF02F9E, "Amazon OUI (Ring/Blink?)"},
+  };
+  for (const auto& e : table)
+    if (e.oui == oui) return e.reason;
   return "";
 }
+
+// macVendor() lives in RadioAuditActivity.cpp now: the OUI table moved off flash
+// onto the SD card (/.radioink/oui.bin), so the lookup needs HalStorage and a
+// file handle, which would violate this file's "pure, stateless, no hardware"
+// contract. The declaration stays in RadioAuditHelpers.h for call sites.
 
 // ---- BLE advertising-data decoder (iBeacon / Eddystone / Apple / etc.) ----
 std::vector<uint8_t> hexToBytes(const std::string& hex) {
@@ -273,8 +278,30 @@ std::string decodeBleAdvert(const std::string& manufacturerHex, const std::strin
 std::string cameraVendorReason(const std::string& vendor) {
   const std::string v = lowerStr(vendor);
   if (v.empty()) return "";
-  if (v == "amazon") return "Amazon device - possible Ring/Blink";
-  if (v == "hikvision" || v == "dahua" || v == "axis") return vendor + " (camera vendor)";
+  // Substring match: registry names arrive as "Amazon Technologies", "Ring LLC",
+  // etc., so an exact compare would miss them (the old bug that hid Ring/Blink).
+  struct VT {
+    const char* token;
+    const char* reason;
+  };
+  static constexpr VT toks[] = {
+      {"amazon", "Amazon OUI - possible Ring/Blink"},
+      {"ring", "Ring camera vendor"},
+      {"blink", "Blink camera vendor"},
+      {"wyze", "Wyze camera vendor"},
+      {"hikvision", "Hikvision (camera vendor)"},
+      {"dahua", "Dahua (camera vendor)"},
+      {"axis", "Axis (camera vendor)"},
+      {"reolink", "Reolink (camera vendor)"},
+      {"amcrest", "Amcrest (camera vendor)"},
+      {"arlo", "Arlo (camera vendor)"},
+      {"eufy", "Eufy (camera vendor)"},
+      {"foscam", "Foscam (camera vendor)"},
+      {"lorex", "Lorex (camera vendor)"},
+      {"ezviz", "EZVIZ (camera vendor)"},
+  };
+  for (const auto& t : toks)
+    if (v.find(t.token) != std::string::npos) return t.reason;
   return "";
 }
 

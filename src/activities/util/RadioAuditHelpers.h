@@ -27,6 +27,8 @@ std::string lowerStr(std::string s);
 std::string cameraFingerprintReason(const std::string& label, const std::string& vendor);
 // Camera likelihood from a MAC/BLE vendor name (Amazon=Ring/Blink, IP-cam makers).
 std::string cameraVendorReason(const std::string& vendor);
+// Camera vendor from a "AA:BB:CC:.." MAC OUI (Flock Safety + dedicated cam makers).
+std::string cameraMacReason(const std::string& mac);
 
 // Vendor from a "AA:BB:CC:.." MAC: a name, "randomized", or "" if unknown.
 std::string macVendor(const std::string& mac);

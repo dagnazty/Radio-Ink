@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -11,8 +12,9 @@
 
 class FileBrowserActivity final : public Activity {
  public:
-  // Books = standard reader browser; PickFirmware = filter to .bin only and return path via ActivityResult.
-  enum class Mode { Books, PickFirmware };
+  // Books = reader browser (book types only); AllFiles = general SD browser (every
+  // file + sizes, opens only readable types); PickFirmware = .bin picker returning a path.
+  enum class Mode { Books, AllFiles, PickFirmware };
 
  private:
   // Deletion
@@ -32,6 +34,7 @@ class FileBrowserActivity final : public Activity {
   // Files state
   std::string basepath = "/";
   std::vector<std::string> files;
+  std::vector<uint32_t> fileSizes;  // parallel to files; 0 for directories (AllFiles mode)
   std::unique_ptr<char[]> fileNameBuffer;
 
   // Data loading
