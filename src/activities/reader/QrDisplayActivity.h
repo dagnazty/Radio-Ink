@@ -17,4 +17,5 @@ class QrDisplayActivity final : public Activity {
 
  private:
   std::string textPayload;
+  bool armed = false;  // true once the launching button is released (prevents instant-close)
 };

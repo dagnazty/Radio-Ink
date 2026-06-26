@@ -7,9 +7,41 @@
 
 #include "RadioInkSettings.h"
 #include "components/UITheme.h"
+#include "components/icons/book.h"
+#include "components/icons/bookmark.h"
+#include "components/icons/folder.h"
+#include "components/icons/hotspot.h"
+#include "components/icons/library.h"
+#include "components/icons/recent.h"
+#include "components/icons/settings2.h"
+#include "components/icons/transfer.h"
+#include "components/icons/wifi.h"
 #include "components/themes/lyra/LyraTheme.h"
 #include "fontIds.h"
 #include "images/RadioInkSkull.h"
+
+namespace {
+// 32px glyph for a menu row's category icon, or nullptr if there is no 32px
+// bitmap (Image/Text/File/None) -- those rows simply show a blank icon column so
+// labels stay aligned across every menu.
+const uint8_t* radioInkIcon32(UIIcon icon) {
+  switch (icon) {
+    case UIIcon::Wifi: return WifiIcon;
+    case UIIcon::Hotspot: return HotspotIcon;
+    case UIIcon::Library: return LibraryIcon;
+    case UIIcon::Transfer: return TransferIcon;
+    case UIIcon::Folder: return FolderIcon;
+    case UIIcon::Bookmark: return BookmarkIcon;
+    case UIIcon::Recent: return RecentIcon;
+    case UIIcon::Settings: return Settings2Icon;
+    case UIIcon::Book: return BookIcon;
+    default: return nullptr;
+  }
+}
+constexpr int kMenuIconSize = 32;
+constexpr int kMenuIconPad = 10;
+constexpr int kMenuIconCol = kMenuIconSize + kMenuIconPad;
+}  // namespace
 
 void RadioInkTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                     const char* btn4) const {
@@ -70,7 +102,7 @@ void RadioInkTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const cha
 
 void RadioInkTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                    const std::function<std::string(int index)>& buttonLabel,
-                                   const std::function<UIIcon(int index)>& /*rowIcon*/) const {
+                                   const std::function<UIIcon(int index)>& rowIcon) const {
   const ThemeMetrics& m = LyraMetrics::values;
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
   const int rowStride = m.menuRowHeight + m.menuSpacing;
@@ -95,10 +127,19 @@ void RadioInkTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonC
 
     if (selected) renderer.fillRect(rowX, rowY, rowW, m.menuRowHeight, true);  // inverted block
 
+    // Category icon column. Skip the glyph on the selected row (it would vanish on
+    // the black bar) but keep the column reserved so labels stay aligned.
+    if (!selected && rowIcon) {
+      const uint8_t* glyph = radioInkIcon32(rowIcon(i));
+      if (glyph != nullptr)
+        renderer.drawIcon(glyph, rowX + kMenuIconPad, rowY + (m.menuRowHeight - kMenuIconSize) / 2, kMenuIconSize,
+                          kMenuIconSize);
+    }
+
     const std::string label = std::string(selected ? "> " : "  ") + buttonLabel(i);
     const int textY = rowY + (m.menuRowHeight - lineHeight) / 2;
     // White ink on the inverted bar, black ink otherwise; bold for the hiphop weight.
-    renderer.drawText(UI_12_FONT_ID, rowX + 12, textY, label.c_str(), !selected, EpdFontFamily::BOLD);
+    renderer.drawText(UI_12_FONT_ID, rowX + kMenuIconCol + 12, textY, label.c_str(), !selected, EpdFontFamily::BOLD);
   }
 }
 
@@ -120,7 +161,7 @@ void RadioInkTheme::drawTabBar(const GfxRenderer& renderer, Rect rect, const std
 void RadioInkTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                              const std::function<std::string(int index)>& rowTitle,
                              const std::function<std::string(int index)>& rowSubtitle,
-                             const std::function<UIIcon(int index)>& /*rowIcon*/,
+                             const std::function<UIIcon(int index)>& rowIcon,
                              const std::function<std::string(int index)>& rowValue, bool /*highlightValue*/,
                              const std::function<bool(int index)>& rowDimmed) const {
   const ThemeMetrics& m = LyraMetrics::values;
@@ -148,12 +189,21 @@ void RadioInkTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCou
     renderer.fillRect(rect.x + m.contentSidePadding, sy, contentWidth - m.contentSidePadding * 2, rowHeight, true);
   }
 
-  const int textX = rect.x + m.contentSidePadding + HPAD;
+  // Reserve a left icon column so titles align whether or not a row has a glyph.
+  const int textX = rect.x + m.contentSidePadding + kMenuIconCol + HPAD;
   const int pageStartIndex = selectedIndex / pageItems * pageItems;
   for (int i = pageStartIndex; i < itemCount && i < pageStartIndex + pageItems; i++) {
     const int itemY = rect.y + (i % pageItems) * rowHeight;
     const bool sel = (i == selectedIndex);
-    int rowTextWidth = contentWidth - m.contentSidePadding * 2 - HPAD * 2;
+    int rowTextWidth = contentWidth - m.contentSidePadding * 2 - HPAD * 2 - kMenuIconCol;
+
+    // Category glyph; skipped on the selected (inverted) row where it would vanish.
+    if (!sel && rowIcon) {
+      const uint8_t* glyph = radioInkIcon32(rowIcon(i));
+      if (glyph != nullptr)
+        renderer.drawIcon(glyph, rect.x + m.contentSidePadding + 4, itemY + (rowHeight - kMenuIconSize) / 2,
+                          kMenuIconSize, kMenuIconSize);
+    }
 
     int valueWidth = 0;
     std::string valueText;

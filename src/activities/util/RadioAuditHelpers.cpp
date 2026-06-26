@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "BleServiceUuids.h"  // flash-resident SIG GATT service-UUID name table
+
 // Pure, stateless helpers extracted from RadioAuditActivity.cpp: MAC/hex/OUI
 // utilities, the BLE advertising decoder, and camera/tracker fingerprinting.
 // No hardware or global capture state.
@@ -78,6 +80,33 @@ std::string bleCompany(const std::string& hex) {
   }
 }
 
+std::string bleServiceName(const std::string& uuid) {
+  std::string u = upperStr(uuid);
+  uint32_t id;
+  if (u.find('-') != std::string::npos) {
+    // 128-bit UUID: only the SIG base range (xxxx-0000-1000-8000-00805F9B34FB)
+    // has assigned short names; a custom 128-bit service has no SIG name.
+    if (u.find("-0000-1000-8000-00805F9B34FB") == std::string::npos || u.size() < 8) return "";
+    id = static_cast<uint32_t>(strtoul(u.substr(0, 8).c_str(), nullptr, 16));  // 0000XXXX
+  } else {
+    if (u.rfind("0X", 0) == 0) u.erase(0, 2);
+    id = static_cast<uint32_t>(strtoul(u.c_str(), nullptr, 16));
+  }
+  if (id > 0xFFFF) return "";
+  const uint16_t key = static_cast<uint16_t>(id);
+  int lo = 0, hi = BLE_SERVICE_NAME_COUNT - 1;
+  while (lo <= hi) {
+    const int mid = (lo + hi) / 2;
+    const uint16_t k = BLE_SERVICE_NAMES[mid].uuid;
+    if (k == key) return BLE_SERVICE_NAMES[mid].name;
+    if (k < key)
+      lo = mid + 1;
+    else
+      hi = mid - 1;
+  }
+  return "";
+}
+
 std::string upperStr(std::string s) {
   for (auto& c : s) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
   return s;
@@ -144,6 +173,16 @@ std::string cameraFingerprintReason(const std::string& label, const std::string&
       {"unifi protect", "UniFi Protect fingerprint"},
       {"unifi video", "UniFi Video fingerprint"},
       {"gopro", "action-camera fingerprint"},
+      // Axon Enterprise (formerly TASER) body / in-car police cameras. Specific
+      // multi-char tokens only -- a bare "axon" would clash with the unrelated
+      // networking vendors "Axon Networks" / "Axona" in the OUI registry.
+      {"axonbody", "Axon Body camera fingerprint"},
+      {"axon body", "Axon Body camera fingerprint"},
+      {"axon fleet", "Axon Fleet in-car camera fingerprint"},
+      {"axon signal", "Axon Signal fingerprint"},
+      {"axon view", "Axon View pairing fingerprint"},
+      {"taser", "Axon/TASER device fingerprint"},
+      {"evidence.com", "Axon Evidence ecosystem fingerprint"},
   };
   for (const auto& token : tokens)
     if (haystack.find(token.token) != std::string::npos) return token.reason;
@@ -173,6 +212,10 @@ std::string cameraMacReason(const std::string& mac) {
       {0xE4AAEA, "Flock Safety OUI"},
       // High-confidence dedicated camera makers (SSID-agnostic).
       {0x0018DD, "Hikvision OUI"}, {0x788B77, "Wyze OUI"}, {0x8C8590, "Reolink OUI"},
+      // Axon Enterprise (body / in-car police cameras). Verified from the IEEE
+      // registry shipped in data/oui/oui.min.csv ("0025DF,Axon Enterprise"); the
+      // similarly named "Axon Networks" OUIs are a different vendor and excluded.
+      {0x0025DF, "Axon Enterprise (body cam) OUI"},
       // Official "Blink by Amazon" OUIs (camera-dedicated, unlike shared Amazon OUIs).
       {0x3CA070, "Blink OUI"}, {0x70AD43, "Blink OUI"}, {0x74AB93, "Blink OUI"},
       // Ring OUIs (hardcoded like C5-Midnight so Ring is found with no SD OUI DB).
@@ -299,6 +342,9 @@ std::string cameraVendorReason(const std::string& vendor) {
       {"foscam", "Foscam (camera vendor)"},
       {"lorex", "Lorex (camera vendor)"},
       {"ezviz", "EZVIZ (camera vendor)"},
+      // Full names so unrelated "Axon Networks" / "Axona" registry entries don't match.
+      {"axon enterprise", "Axon Enterprise (body cam vendor)"},
+      {"taser", "Axon/TASER (body cam vendor)"},
   };
   for (const auto& t : toks)
     if (v.find(t.token) != std::string::npos) return t.reason;
@@ -319,6 +365,80 @@ std::string trackerReason(const std::string& manufacturerHex, const std::string&
   if (n.find("smarttag") != std::string::npos || n.find("smart tag") != std::string::npos) return "Samsung SmartTag";
   if (n.find("chipolo") != std::string::npos) return "Chipolo tracker";
   if (n.find("airtag") != std::string::npos) return "Apple AirTag";
+  return "";
+}
+
+// ---- Threat-sweep signature detectors ----
+
+std::string pwnagotchiReason(const std::string& ssid, const std::string& bssid) {
+  // Pwnagotchi units announce themselves with 802.11 beacons sourced from the
+  // signature MAC DE:AD:BE:EF:xx:xx, carrying a JSON identity blob in the SSID.
+  if (upperStr(bssid).rfind("DE:AD:BE:EF", 0) == 0) return "Pwnagotchi beacon (DE:AD:BE:EF MAC)";
+  const std::string s = lowerStr(ssid);
+  if (s.find("pwnagotchi") != std::string::npos) return "Pwnagotchi (name)";
+  if (!ssid.empty() && ssid[0] == '{' &&
+      (ssid.find("\"name\"") != std::string::npos || ssid.find("\"pal\"") != std::string::npos ||
+       ssid.find("\"grid_version\"") != std::string::npos))
+    return "Pwnagotchi advert (JSON identity)";
+  return "";
+}
+
+std::string bleThreatReason(const std::string& name, [[maybe_unused]] const std::string& manufacturerHex,
+                            const std::string& svcUuid, [[maybe_unused]] const std::string& svcDataHex) {
+  const std::string n = lowerStr(name);
+  const std::string uuid = upperStr(svcUuid);
+
+  // Flipper Zero advertises its serial GATT service 0x3082 (seen as the base-UUID
+  // form 00003082-0000-1000-8000-00805f9b34fb). The advertised name is the random
+  // or user-set device name with NO "Flipper" prefix, so the service UUID is the
+  // reliable signature; a user-renamed "flipper" name is only a fallback.
+  if (uuid.find("3082-0000-1000-8000-00805F9B34FB") != std::string::npos) return "Flipper Zero (svc 0x3082)";
+  if (n.find("flipper") != std::string::npos) return "Flipper Zero (BLE name)";
+
+  // Meshtastic: dedicated 128-bit GATT service UUID, or the default node name.
+  if (uuid.find("6BA1B218") != std::string::npos) return "Meshtastic node (service UUID)";
+  if (n.find("meshtastic") != std::string::npos) return "Meshtastic node (name)";
+
+  // Cheap serial-Bluetooth modules commonly soldered into card skimmers at fuel
+  // pumps and ATMs, matched on their factory-default advertised names: HC-05/06,
+  // HM-10 (HMSoft/BT05/MLT-BT05), JDY-xx, CC41 clones, KCX_BT.
+  static constexpr const char* skimmerTokens[] = {"hc-05",    "hc-06", "hc05",  "hc06",  "linvor",
+                                                  "hmsoft",   "bt05",  "mlt-bt05", "jdy-", "at-09",
+                                                  "cc41",     "spp-c", "bt04",  "kcx_bt"};
+  for (const char* t : skimmerTokens)
+    if (n.find(t) != std::string::npos) return "Possible card-skimmer BT module";
+  return "";
+}
+
+std::string bleSpamFamily(const std::string& advType) {
+  // The popup-spam vectors: Apple proximity pairing (AirPods/"Nearby" actions),
+  // Microsoft Swift Pair, Google Fast Pair, Samsung. A generic "Apple device"
+  // (no pairing subtype) is deliberately excluded -- it is far too common.
+  if (advType.find("AirPods") != std::string::npos || advType.find("Apple Nearby") != std::string::npos)
+    return "Apple";
+  if (advType.find("Swift Pair") != std::string::npos) return "Swift Pair";
+  if (advType.find("Fast Pair") != std::string::npos) return "Fast Pair";
+  if (advType.find("Samsung") != std::string::npos) return "Samsung";
+  return "";
+}
+
+std::string droneBleReason(const std::string& manufacturerHex, const std::string& svcUuid,
+                           const std::string& svcDataUuid) {
+  // ASTM International (0xFFFA) carries OpenDroneID over BLE -- as a 16-bit service
+  // UUID, service-data UUID, or manufacturer company id (first 2 LE bytes = FA FF).
+  if (upperStr(svcUuid).find("FFFA") != std::string::npos) return "Drone Remote ID (BLE service)";
+  if (upperStr(svcDataUuid).find("FFFA") != std::string::npos) return "Drone Remote ID (BLE service)";
+  const std::string m = upperStr(manufacturerHex);
+  if (m.rfind("FAFF", 0) == 0) return "Drone Remote ID (BLE)";  // company 0xFFFA, little-endian
+  return "";
+}
+
+std::string bleRelayReason(int rssiMin, int rssiMax, int seenCount) {
+  // A genuine peripheral at a fixed distance holds a fairly steady RSSI. A relay
+  // (or a spoof rotating through hosts) tends to swing widely between sightings.
+  // Require several sightings so a one-off reflection doesn't trip the heuristic.
+  if (seenCount < 3) return "";
+  if (rssiMax - rssiMin >= 30) return "Erratic RSSI - possible relay/spoof";
   return "";
 }
 

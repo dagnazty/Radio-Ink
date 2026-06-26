@@ -10,14 +10,25 @@
 
 void QrDisplayActivity::onEnter() {
   Activity::onEnter();
+  armed = false;
   requestUpdate();
 }
 
 void QrDisplayActivity::onExit() { Activity::onExit(); }
 
 void QrDisplayActivity::loop() {
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
-      mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  // The button press that opened this screen is often still held on the first
+  // tick. Wait until Back and Confirm are both released before accepting an exit,
+  // otherwise that same press bleeds through and closes the QR instantly.
+  if (!armed) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Back) &&
+        !mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+      armed = true;
+    }
+    return;
+  }
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
     finish();
     return;
   }
@@ -39,7 +50,10 @@ void QrDisplayActivity::render(RenderLock&&) {
   QrUtils::drawQrCode(renderer, qrBounds, textPayload);
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  UITheme::getInstance().suppressBrandLogoOnce();  // keep the skull off the QR's bottom-right corner
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
-  renderer.displayBuffer();
+  // Full refresh: a fast/partial refresh leaves e-ink ghosting that corrupts the
+  // QR modules so a phone can't decode them.
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
 }

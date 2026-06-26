@@ -33,27 +33,56 @@ Created and maintained by **dag nazty** — <https://dagnazty.dev>. Fork at
 
 Reachable from **Home → Radio Ink**, grouped into menu categories:
 
-- **Recon** — Quick / Deep Wi-Fi + BLE scans, client recon (probe-request harvesting), channel-usage
-  map, a **Tracker Sweep** that flags AirTag / FindMy / Tile / Samsung SmartTag / Chipolo tags, and a
-  passive **Deauth Detector** that flags deauth/disassoc floods and the source MAC.
-- **Capture** — **Live PCAP** streamed to SD (open in Wireshark) and **WPA handshake / PMKID** capture
-  exported in **hashcat `22000`** format.
+- **Scan** — Quick / Deep Wi-Fi + BLE scans, **client recon** (probe-request harvesting), and a
+  **channel-usage** map.
+- **Detect** — passive threat / signature monitors:
+  - **Guardian Mode** — set-and-forget watch that unifies the detectors below (BLE pairing spam, Flipper,
+    drones, item-trackers / watchlisted MACs that follow you, and Wi-Fi deauth floods) into one **ALL
+    CLEAR / alert** dashboard. Leave it running; Stop responds mid-round.
+  - **Threat Sweep** — flags **Flipper Zero** (BLE service `0x3082`), **Pwnagotchi** (promiscuous beacon
+    listen for the `DE:AD:BE:EF` / JSON-SSID signature), **Meshtastic** nodes,
+    BLE **card-skimmer** modules (HC-05/06, HM-10, JDY…), **BLE relay/spoof** RSSI anomalies, **BLE pairing
+    spam** floods (Flipper/app Apple/SwiftPair/FastPair/Samsung popups), and **Axon** body/in-car cameras.
+    The BLE scan is flood-safe (streams + discards each advert) so a spam attack can't OOM it.
+  - **Camera Sweep** *(interactive)* — Wi-Fi/BLE + associated-client OUI fingerprinting for IP cameras,
+    **Ring / Blink** (hardcoded OUIs, plus randomized-MAC candidates), doorbells and NVRs — select a hit to
+    **Locate** or **Deauth** it.
+  - **Tracker Sweep** — AirTag / FindMy / Tile / Samsung SmartTag / Chipolo tags.
+  - **Anti-Stalk Watch** — re-scans BLE on an interval and flags a tracker or watchlisted device that keeps
+    following you across passes.
+  - **Drone RID Scan** — decodes **OpenDroneID / ASTM F3411** Remote ID from Wi-Fi beacons (drone serial, UA
+    type, live GPS lat/lon/altitude); BLE Remote ID (service `0xFFFA`) also surfaces in the BLE scans.
+  - **Deauth Detector** — flags deauth/disassoc floods and the source MAC.
+- **Capture** — **Live PCAP** streamed to SD (open in Wireshark), **WPA handshake / PMKID** capture
+  exported in **hashcat `22000`** format, and a **Scheduled Log** — unattended periodic Wi-Fi+BLE scan to a
+  timestamped CSV on SD, with a setup screen to pick the **interval** (15 s–10 min), **run-time**
+  (15 min–8 h or until stopped), and **radios** (Wi-Fi+BLE / Wi-Fi only / BLE only).
 - **Attacks** *(dev builds only, authorization-gated)* — targeted / grouped / all **deauth** (including
   directed deauth of a selected camera), **beacon flood**, **evil-twin captive portal** with credential
   capture, **Karma / probe-response**, and **BLE advertisement spoof**.
-- **Results** — audit findings (WPS / missing PMF / open / WEP / rogue-AP / deauth activity), Wi-Fi and
-  BLE result lists, and an **interactive Camera Sweep**: Wi-Fi/BLE + associated-client OUI fingerprinting
-  for IP cameras, **Ring / Blink** (hardcoded OUIs, plus randomized-MAC candidates), doorbells and NVRs —
-  select a hit to **Locate** or **Deauth** it.
+- **Results** — audit findings (open / WEP / legacy-WPA / hidden / **WPS** / **evil-twin** — one SSID on
+  multiple BSSIDs with mixed encryption / rogue-AP / deauth activity, plus every Threat Sweep signature:
+  Flipper / Pwnagotchi / skimmer / Meshtastic / BLE relay / BLE spam / drone / Axon) and the Wi-Fi / BLE
+  result lists. Also **View Reports** (read saved reports/captures on-device) and **Share Findings (web)** —
+  the device hosts a WPA2 SoftAP + captive portal; scan the Wi-Fi-join QR on a phone and the findings open
+  like a web page (fully offline; the device auto-reboots on exit to free memory for scanning).
 - **Export** — TXT / CSV / JSON reports plus **WiGLE-1.4 CSV** for wardriving, all RTC-stamped to SD.
   (No on-board GPS: drop a `location.txt` with `lat,lon` on the SD to tag WiGLE rows.)
 - Plus, from any deep-scan detail: **GATT enumerate**, an **RSSI locator** ("warmer/colder"), vendor
   lookup, BLE-advert decoding, a MAC **watchlist**, and **scan-to-scan diff** (NEW / GONE devices).
 
-**Vendor database (SD):** the full IEEE OUI table (~39,500 vendors) lives on the SD card at
-`/.radioink/oui.bin` (built by `scripts/gen_oui.py`). Copy it there to get vendor names across scans,
-Camera Sweep, and exports — without it, MAC lookups (including Ring/Blink) fall back to the small
-hardcoded set.
+**Vendor databases (SD):** two lookup tables live on the SD card (kept off flash, same as a real
+wardriver's data) — copy both into `/.radioink/`:
+
+- `oui.bin` — the full IEEE OUI table (~39,500 Wi-Fi/MAC vendors), built by `scripts/gen_oui.py`. Drives
+  vendor names across scans, Camera Sweep, and exports; without it, MAC lookups (including Ring/Blink)
+  fall back to a small hardcoded set.
+- `ble_companies.bin` — the Bluetooth SIG company-ID table (~4,000 BLE vendors), built by
+  `scripts/gen_ble_companies.py`. Turns BLE `Vendor:` lines from `0x004C` into `Apple, Inc.` etc.;
+  without it, BLE vendor naming falls back to a small built-in set.
+
+BLE **service-UUID** names (GAP/GATT/HID/battery/…) are compiled into flash (~75 entries), so service
+identification works with no SD file.
 
 Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives under `/.radioink/`.
 
@@ -225,6 +254,19 @@ pio run -e default                  # dev build (serial logging; attack features
 pio run -e default --target upload  # build + flash + monitor
 pio run -e gh_release               # production build (no serial; attack features compiled out)
 ```
+
+**Optional build flags — hyphenation languages:**
+
+To minimize flash, **English is the only hyphenation language compiled in by default.** Every other
+language is opt-in, since the pattern tries are the largest data in the firmware (de ~206 KB, ru ~33 KB,
+sv ~24 KB, uk ~21 KB, pl ~16 KB, es ~14 KB, fr ~7 KB, it ~1.5 KB). Disabling a language only removes
+mid-word hyphenation — those books still render and wrap at word boundaries.
+
+- `-DHYPH_ENABLE_DE` / `_FR` / `_RU` / `_ES` / `_IT` / `_PL` / `_SV` / `_UK` — compile a specific
+  language's hyphenation back in.
+- `-DHYPH_ENABLE_ALL` — compile every language's hyphenation in (the pre-1.2.0 behavior).
+
+Add these to `build_flags` in `platformio.local.ini` (recommended) or `platformio.ini`.
 
 ### Contributor pre-PR checks
 

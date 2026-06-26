@@ -45,14 +45,34 @@ class RadioAuditActivity final : public Activity {
     BleSpoof,
     Karma,
     DeauthCameras,
+    ThreatSweep,
+    AntiStalk,
+    DroneScan,
+    ReportViewer,
+    ShareWeb,
+    Guardian,
+    ScheduledLog,
     About,
     COUNT,
   };
 
  private:
-  enum class State { IDLE, WIFI_SCANNING, BLE_SCANNING, CAPTURING, ATTACKING, DONE, SAVED, ERROR };
+  enum class State {
+    IDLE,
+    WIFI_SCANNING,
+    BLE_SCANNING,
+    CAPTURING,
+    ATTACKING,
+    STALKING,
+    GUARDIAN,
+    LOG_SETUP,
+    LOGGING,
+    DONE,
+    SAVED,
+    ERROR
+  };
   enum class ScanScope { Both, WifiOnly, BleOnly };
-  enum class CaptureMode { Pcap, Handshake, DeauthDetect };
+  enum class CaptureMode { Pcap, Handshake, DeauthDetect, DroneScan };
   enum class AttackMode { Deauth, Beacon, BleSpoof, Karma, CameraDeauth };
 
   struct WifiFinding {
@@ -66,6 +86,7 @@ class RadioAuditActivity final : public Activity {
     int32_t channel = 0;
     int32_t seenCount = 0;
     bool hidden = false;
+    bool wps = false;     // WPS advertised in the AP's scan record (PIN-attack surface)
     bool marked = false;  // selected as a deauth target ("Deauth selected")
   };
 
@@ -73,6 +94,7 @@ class RadioAuditActivity final : public Activity {
     std::string address;
     std::string name;
     std::string manufacturerHex;
+    std::string serviceUuid;      // advertised primary service UUID (e.g. Meshtastic)
     std::string serviceDataUuid;
     std::string serviceDataHex;
     int rssi = 0;
@@ -203,6 +225,41 @@ class RadioAuditActivity final : public Activity {
   // SD file browser for audit outputs (captures + reports under /.radioink).
   // Navigation is floored at the audit root; files are deletable, dirs descend.
 
+  // Anti-Stalk Watch: a device that keeps reappearing across repeated BLE passes
+  // as you move is a possible follower. Tracked across passes by BLE address.
+  struct StalkEntry {
+    std::string addr;
+    std::string label;  // device name or resolved vendor
+    std::string kind;   // tracker classification, if any
+    int passesSeen = 0;
+    int passesMissed = 0;
+    int rssi = 0;
+    bool tracker = false;
+    bool watchlisted = false;
+    bool seenThisPass = false;
+  };
+  std::vector<StalkEntry> stalkTable;
+  int stalkPassCount = 0;
+  uint32_t stalkLastPassMs = 0;
+
+  // Guardian Mode: aggregated live threat list (rebuilt each round) + the worst
+  // severity seen this session, for the persistent alert banner.
+  std::vector<std::string> guardianThreats;
+  int guardianRound = 0;
+  uint32_t guardianLastMs = 0;
+  int guardianAlertPeak = 0;  // 0 = all clear, 1 = caution, 2 = alert
+
+  // Scheduled Log: unattended periodic scan -> SD CSV (reuses captureFile/path).
+  int logCycles = 0;
+  int logEntries = 0;
+  uint32_t logLastMs = 0;
+  int logIntervalSel = 1;          // index into the interval presets (default 30 s)
+  uint32_t logIntervalMs = 30000;  // chosen scan interval, set from the setup screen
+  int logSetupField = 0;           // which setup row is selected (0 interval, 1 run-time, 2 radios)
+  int logDurationSel = 0;          // run-time preset index (0 = until stopped)
+  int logRadioSel = 0;             // 0 = WiFi+BLE, 1 = WiFi only, 2 = BLE only
+  uint32_t logStartMs = 0;         // when logging began (for the auto-stop duration)
+
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   BLEScan* bleScan = nullptr;
   bool bleReady = false;
@@ -217,6 +274,16 @@ class RadioAuditActivity final : public Activity {
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   void absorbBleResults(BLEScanResults* results, int maxDevices);  // merge one scan window, capped
   bool runBleScan(bool active, int windows);  // WiFi-off + heap-guarded bounded BLE windows -> bleFindings
+  // Flood-safe scan for the Threat Sweep: passive scan + a per-advert callback
+  // that merges each device then erases it from the BLE result map, so a BLE-spam
+  // flood can't accumulate hundreds of parsed adverts and exhaust scan-time heap.
+  bool runBleScanStreaming(int windows);
+ public:
+  // Sink for the streaming callback (one parsed advert). Public only so the
+  // anonymous-namespace callback object in the .cpp can reach it.
+  void ingestStreamedAdvert(BLEAdvertisedDevice& device);
+
+ private:
 #endif
   void shutdownBleController();
   void resetWifiForScan();
@@ -224,6 +291,9 @@ class RadioAuditActivity final : public Activity {
   void mergeWifiFinding(WifiFinding&& finding);
   void mergeBleFinding(BleFinding&& finding);
   void rebuildAuditFindings();
+  // Count BLE pairing-popup adverts in bleFindings (Apple/SwiftPair/FastPair/
+  // Samsung); sets dominantFamily to the most common. Used to flag BLE spam.
+  int bleSpamAdvertCount(std::string& dominantFamily) const;
   void addAuditFinding(const char* severity, const std::string& title, const std::string& detail, int wifiIndex = -1,
                        int bleIndex = -1);
   void showAuditFindings();
@@ -239,6 +309,22 @@ class RadioAuditActivity final : public Activity {
 #endif
   void showAbout();  // credits + version page
   void startTrackerSweep();  // active BLE scan, then list AirTag/Tile/SmartTag trackers
+  void startAntiStalk();     // repeated BLE passes; flag devices that follow across passes
+  void antiStalkPass();      // one BLE pass: update the persistence table
+  void stopAntiStalk();      // end the watch, show a summary of followers
+  void renderAntiStalk();    // live persistence view
+  bool isWatchlisted(const std::string& mac) const;  // MAC/prefix match against watchlist.txt
+  void startGuardian();      // set-and-forget monitor: unifies the passive detectors
+  void guardianPass();       // one round: BLE threats + followers, then a deauth-flood window
+  void stopGuardian();
+  void renderGuardian();     // live threat dashboard (ALL CLEAR / active threats)
+  void showLogSetup();       // interval picker shown before logging starts
+  void renderLogSetup();
+  void startScheduledLog();  // unattended: scan WiFi+BLE on an interval, append to SD with timestamps
+  void scanLogPass();        // one logging cycle
+  void stopScheduledLog();
+  void renderScheduledLog();
+  void startThreatSweep();   // WiFi+BLE scan, then list Flipper/Pwnagotchi/skimmer/Meshtastic/relay/Axon hits
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   void gattEnumerate();  // connect to the detail-view BLE device and dump services
 #endif
@@ -256,6 +342,9 @@ class RadioAuditActivity final : public Activity {
   void stopDeauthDetect();
   void processDeauthDetect();  // write alert lines for sources over threshold
   void renderDeauthDetect();
+  void startDroneScan();       // passive OpenDroneID (Remote ID) beacon monitor
+  void stopDroneScan();
+  void renderDroneScan();
   void openTargetMenu();              // build + show the deep-scan action menu
   std::string targetMenuLabel(int code) const;
   void runTargetMenuItem(int code);
@@ -310,6 +399,7 @@ class RadioAuditActivity final : public Activity {
   void render(RenderLock&&) override;
   bool preventAutoSleep() override {
     return state == State::WIFI_SCANNING || state == State::BLE_SCANNING || state == State::CAPTURING ||
-           state == State::ATTACKING || locating;
+           state == State::ATTACKING || state == State::STALKING || state == State::GUARDIAN ||
+           state == State::LOGGING || locating;
   }
 };

@@ -20,7 +20,9 @@
 
 #include "MappedInputManager.h"
 #include "RadioAuditHelpers.h"
+#include "activities/home/FileBrowserActivity.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "activities/util/WebReportActivity.h"
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
 #include "activities/util/EvilTwinActivity.h"
 #endif
@@ -58,7 +60,9 @@ constexpr const char* ACTION_LABELS[ACTION_COUNT] = {
     "Save JSON report",  "Save WiGLE CSV",    "Live PCAP capture",
     "Handshake/PMKID",   "Deauth (all APs)",  "Deauth selected",   "Beacon flood",
     "Evil Twin / Portal", "Tracker Sweep",    "Deauth Detector",   "BLE Spoof",
-    "Karma / Probe Resp", "Deauth Cameras",   "About Radio Ink"};
+    "Karma / Probe Resp", "Deauth Cameras",   "Threat Sweep",      "Anti-Stalk Watch",
+    "Drone RID Scan",    "View Reports",      "Share Findings (web)", "Guardian Mode",
+    "Scheduled Log",     "About Radio Ink"};
 
 const char* actionLabel(Action a) { return ACTION_LABELS[static_cast<int>(a)]; }
 
@@ -81,27 +85,41 @@ struct ActionCategory {
   int count;
   UIIcon icon;
 };
-constexpr Action CAT_RECON_ITEMS[] = {Action::QuickScan,   Action::DeepScan,      Action::WifiScan,
-                                      Action::BleScan,     Action::ClientRecon,   Action::ChannelUsage,
-                                      Action::TrackerSweep, Action::DeauthDetector};
-constexpr Action CAT_CAPTURE_ITEMS[] = {Action::CapturePcap, Action::CaptureHandshake};
-constexpr Action CAT_RESULTS_ITEMS[] = {Action::AuditFindings, Action::WifiResults, Action::BleResults,
-                                        Action::CameraSweep};
+// Category item lists, grouped by intent. CAT_ENTRY derives the count from the
+// array so it can never drift out of sync when items are added/removed.
+#define CAT_ENTRY(name, arr, icon) \
+  { name, arr, static_cast<int>(sizeof(arr) / sizeof((arr)[0])), icon }
+
+// Scan: enumerate what's around.
+constexpr Action CAT_SCAN_ITEMS[] = {Action::QuickScan,   Action::DeepScan,    Action::WifiScan,
+                                     Action::BleScan,     Action::ClientRecon, Action::ChannelUsage};
+// Detect: passive threat / signature monitors.
+constexpr Action CAT_DETECT_ITEMS[] = {Action::Guardian,    Action::ThreatSweep, Action::CameraSweep,
+                                       Action::TrackerSweep, Action::AntiStalk,   Action::DroneScan,
+                                       Action::DeauthDetector};
+// Capture: stream to SD.
+constexpr Action CAT_CAPTURE_ITEMS[] = {Action::CapturePcap, Action::CaptureHandshake, Action::ScheduledLog};
+// Results: review on-device.
+constexpr Action CAT_RESULTS_ITEMS[] = {Action::AuditFindings, Action::WifiResults,  Action::BleResults,
+                                        Action::ReportViewer,  Action::ShareWeb};
+// Export: save reports to SD.
 constexpr Action CAT_EXPORT_ITEMS[] = {Action::ExportText, Action::ExportCsv, Action::ExportJson,
                                        Action::ExportWigle};
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
-constexpr Action CAT_ATTACK_ITEMS[] = {Action::DeauthAttack, Action::DeauthSelected, Action::BeaconFlood,
-                                       Action::EvilTwin,     Action::BleSpoof,       Action::Karma,
-                                       Action::DeauthCameras};
+// Attacks: active/transmitting, dev builds only.
+constexpr Action CAT_ATTACK_ITEMS[] = {Action::DeauthAttack, Action::DeauthSelected, Action::DeauthCameras,
+                                       Action::BeaconFlood,  Action::EvilTwin,       Action::Karma,
+                                       Action::BleSpoof};
 #endif
 constexpr ActionCategory ACTION_CATEGORIES[] = {
-    {"Recon", CAT_RECON_ITEMS, 8, UIIcon::Wifi},
-    {"Capture", CAT_CAPTURE_ITEMS, 2, UIIcon::Wifi},
+    CAT_ENTRY("Scan", CAT_SCAN_ITEMS, UIIcon::Wifi),
+    CAT_ENTRY("Detect", CAT_DETECT_ITEMS, UIIcon::Bookmark),
+    CAT_ENTRY("Capture", CAT_CAPTURE_ITEMS, UIIcon::Transfer),
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
-    {"Attacks", CAT_ATTACK_ITEMS, 7, UIIcon::Wifi},
+    CAT_ENTRY("Attacks", CAT_ATTACK_ITEMS, UIIcon::Hotspot),
 #endif
-    {"Results", CAT_RESULTS_ITEMS, 4, UIIcon::Wifi},
-    {"Export", CAT_EXPORT_ITEMS, 4, UIIcon::File},
+    CAT_ENTRY("Results", CAT_RESULTS_ITEMS, UIIcon::Library),
+    CAT_ENTRY("Export", CAT_EXPORT_ITEMS, UIIcon::Folder),  // File has no 32px glyph; Folder = save-to-SD
 };
 constexpr int CATEGORY_COUNT = sizeof(ACTION_CATEGORIES) / sizeof(ACTION_CATEGORIES[0]);
 
@@ -115,6 +133,28 @@ constexpr size_t MAX_BLE_FINDINGS = 24;
 // the first window ever runs -- only bail when heap is genuinely critical.
 constexpr uint32_t BLE_HEAP_FLOOR_START = 50000;
 constexpr uint32_t BLE_HEAP_FLOOR_ABORT = 9000;
+// BLE pairing-popup adverts seen in one sweep before we call it a spam flood.
+// bleFindings is capped at MAX_BLE_FINDINGS (24), so during a real Flipper/app
+// flood nearly every slot fills with pairing adverts; 8 is a safe trip point.
+constexpr int BLE_SPAM_THRESHOLD = 8;
+// Anti-Stalk Watch tuning.
+constexpr uint32_t STALK_INTERVAL_MS = 12000;  // gap between BLE re-scan passes
+constexpr int STALK_MAX = 24;                  // tracked devices (bounded)
+constexpr int STALK_THRESHOLD = 3;             // passes seen before "following you"
+constexpr int STALK_FORGET = 3;                // consecutive misses before eviction
+// Guardian Mode tuning.
+constexpr uint32_t GUARDIAN_INTERVAL_MS = 2000;  // gap between monitor rounds
+constexpr uint32_t GUARDIAN_DEAUTH_WINDOW_MS = 2500;  // promiscuous deauth-flood listen per round
+// Scheduled Log setup presets, chosen on the setup form.
+constexpr int LOG_INTERVAL_SECS[] = {15, 30, 60, 300, 600};
+constexpr const char* LOG_INTERVAL_LABELS[] = {"15 seconds", "30 seconds", "1 minute", "5 minutes", "10 minutes"};
+constexpr int LOG_INTERVAL_COUNT = sizeof(LOG_INTERVAL_SECS) / sizeof(LOG_INTERVAL_SECS[0]);
+constexpr uint32_t LOG_DURATION_SECS[] = {0, 900, 3600, 14400, 28800};  // 0 = until stopped
+constexpr const char* LOG_DURATION_LABELS[] = {"Until stopped", "15 minutes", "1 hour", "4 hours", "8 hours"};
+constexpr int LOG_DURATION_COUNT = sizeof(LOG_DURATION_SECS) / sizeof(LOG_DURATION_SECS[0]);
+constexpr const char* LOG_RADIO_LABELS[] = {"WiFi + BLE", "WiFi only", "BLE only"};
+constexpr int LOG_RADIO_COUNT = 3;
+constexpr int LOG_SETUP_FIELDS = 3;
 constexpr const char* AUDIT_DIR = "/.radioink/radio_ink";
 constexpr const char* TEXT_EXPORT_PATH = "/.radioink/radio_ink/latest.txt";
 constexpr const char* CSV_EXPORT_PATH = "/.radioink/radio_ink/latest.csv";
@@ -193,6 +233,68 @@ void ouiOpen() {
 void ouiClose() {
   if (g_ouiFile.isOpen()) g_ouiFile.close();
   g_ouiCount = 0;
+}
+
+// ---- SD-resident BLE company-id -> vendor database (scripts/gen_ble_companies.py) ----
+// Same seek-and-binary-search approach as the OUI db; kept off flash. Records are
+// 'BLEC' magic + uint32 count, then 32-byte records sorted by id ascending:
+// uint16 id + uint16 pad + 28-byte NUL-padded name. Absent file -> count 0 (the
+// built-in vendor set in ra::bleCompany still applies).
+constexpr size_t BLECOMP_HEADER_SIZE = 8;
+constexpr size_t BLECOMP_NAME_FIELD = 28;
+constexpr size_t BLECOMP_RECORD_SIZE = 4 + BLECOMP_NAME_FIELD;  // 32 bytes
+constexpr int BLECOMP_CACHE_SIZE = 16;
+
+HalFile g_bleCompFile;
+uint32_t g_bleCompCount = 0;
+
+struct BleCompCacheEntry {
+  uint16_t id;
+  bool valid;
+  char name[BLECOMP_NAME_FIELD];  // "" = known-miss
+};
+BleCompCacheEntry g_bleCompCache[BLECOMP_CACHE_SIZE] = {};
+int g_bleCompCacheNext = 0;
+
+void bleCompOpen() {
+  g_bleCompCount = 0;
+  for (auto& e : g_bleCompCache) e.valid = false;
+  g_bleCompCacheNext = 0;
+
+  static const char* const kCandidates[] = {
+      "/.radioink/ble_companies.bin",
+      "/ble_companies.bin",
+      "/.radioink/radio_ink/ble_companies.bin",
+  };
+  const char* path = nullptr;
+  for (const char* c : kCandidates) {
+    if (Storage.exists(c)) {
+      path = c;
+      break;
+    }
+  }
+  if (!path) {
+    LOG_INF("RADIO", "BLE company db not on SD; built-in vendor set only");
+    return;
+  }
+  if (!Storage.openFileForRead("RADIO", path, g_bleCompFile)) {
+    LOG_ERR("RADIO", "BLE company db open failed: %s", path);
+    return;
+  }
+  uint8_t hdr[BLECOMP_HEADER_SIZE];
+  const int got = g_bleCompFile.read(hdr, BLECOMP_HEADER_SIZE);
+  if (got != static_cast<int>(BLECOMP_HEADER_SIZE) || memcmp(hdr, "BLEC", 4) != 0) {
+    LOG_ERR("RADIO", "BLE company db header bad at %s", path);
+    g_bleCompFile.close();
+    return;
+  }
+  memcpy(&g_bleCompCount, hdr + 4, 4);  // little-endian
+  LOG_INF("RADIO", "BLE company db loaded from %s: %u companies", path, static_cast<unsigned>(g_bleCompCount));
+}
+
+void bleCompClose() {
+  if (g_bleCompFile.isOpen()) g_bleCompFile.close();
+  g_bleCompCount = 0;
 }
 
 String hexEncode(const String& bytes) {
@@ -881,6 +983,192 @@ void deauthDetectCb(void* buf, wifi_promiscuous_pkt_type_t type) {
   slot->lastChannel = fr.channel;
 }
 
+// ---- Drone Remote ID monitor (OpenDroneID / ASTM F3411, passive) ----
+// Parses the ASTM vendor-specific IE (OUI FA:0B:BC, type 0x0D) carried in Wi-Fi
+// beacons by FAA-compliant drones, decoding the Basic ID (serial) and Location
+// (lat/lon/altitude) messages. The callback only writes fixed slots (no heap/SD
+// in Wi-Fi context); the loop refreshes the screen. BLE-broadcast Remote ID is
+// caught separately by ra::droneBleReason() in the BLE classifiers.
+constexpr int DRONE_MAX_SLOTS = 8;
+
+struct DroneEntry {
+  bool used;
+  uint8_t mac[6];     // beacon transmitter (addr2)
+  char id[21];        // ODID UAS ID (serial), NUL-terminated
+  uint8_t uaType;     // UA type (0..15)
+  bool haveId;
+  bool haveLoc;
+  int32_t latE7;      // latitude  * 1e7 (degrees)
+  int32_t lonE7;      // longitude * 1e7
+  int16_t altM;       // geodetic altitude (m)
+  volatile int8_t rssi;
+  volatile uint8_t channel;
+};
+
+struct DroneScanState {
+  volatile bool active;
+  DroneEntry slots[DRONE_MAX_SLOTS];
+  volatile uint32_t beaconsSeen;
+  volatile uint32_t odidFrames;
+};
+std::unique_ptr<DroneScanState> g_drone;  // allocated only while the monitor runs
+
+// Decode one 25-byte ODID message into the slot (Basic ID + Location only).
+inline void odidParseMessage(DroneEntry* slot, const uint8_t* m) {
+  const uint8_t mtype = m[0] >> 4;
+  if (mtype == 0) {  // Basic ID
+    slot->uaType = m[1] & 0x0F;
+    memcpy(slot->id, m + 2, 20);
+    slot->id[20] = '\0';
+    for (int z = 0; z < 20; z++)  // sanitize non-printable bytes for display
+      if (slot->id[z] && (slot->id[z] < 0x20 || slot->id[z] > 0x7E)) slot->id[z] = '.';
+    slot->haveId = true;
+  } else if (mtype == 1) {  // Location / Vector
+    int32_t lat, lon;
+    memcpy(&lat, m + 5, 4);  // little-endian, memcpy for RISC-V alignment
+    memcpy(&lon, m + 9, 4);
+    uint16_t altEnc;
+    memcpy(&altEnc, m + 15, 2);  // geodetic altitude, encoded
+    slot->latE7 = lat;
+    slot->lonE7 = lon;
+    slot->altM = static_cast<int16_t>(static_cast<int>(altEnc) / 2 - 1000);  // ODID: enc*0.5 - 1000
+    slot->haveLoc = true;
+  }
+}
+
+// Ingest an ODID message-pack (or a single message) from a vendor IE body.
+inline void odidIngest(const uint8_t* d, int dlen, const uint8_t* mac, int8_t rssi, uint8_t channel) {
+  if (dlen < 1) return;
+  const uint8_t* msgs;
+  int count;
+  if ((d[0] >> 4) == 0x0F) {  // message pack header
+    if (dlen < 3 || d[1] != 25) return;
+    count = d[2];
+    msgs = d + 3;
+    const int avail = (dlen - 3) / 25;
+    if (count > avail) count = avail;
+  } else {  // a single 25-byte message
+    if (dlen < 25) return;
+    msgs = d;
+    count = 1;
+  }
+  if (count <= 0) return;
+  if (count > DRONE_MAX_SLOTS * 2) count = DRONE_MAX_SLOTS * 2;  // sanity cap
+
+  DroneEntry* slot = nullptr;
+  for (auto& s : g_drone->slots)
+    if (s.used && macEq(s.mac, mac)) {
+      slot = &s;
+      break;
+    }
+  if (!slot) {
+    for (auto& s : g_drone->slots)
+      if (!s.used) {
+        s = DroneEntry{};
+        s.used = true;
+        memcpy(s.mac, mac, 6);
+        slot = &s;
+        break;
+      }
+  }
+  if (!slot) return;  // table full
+  slot->rssi = rssi;
+  slot->channel = channel;
+  for (int k = 0; k < count; k++) {
+    const int off = static_cast<int>(msgs - d) + k * 25;
+    if (off + 25 > dlen) break;
+    odidParseMessage(slot, msgs + k * 25);
+  }
+  g_drone->odidFrames++;
+}
+
+void droneScanCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!g_drone || !g_drone->active) return;
+  if (type != WIFI_PKT_MGMT) return;
+  PromiscFrame fr;
+  if (!parsePromiscFrame(buf, fr)) return;
+  if (fr.ftype != 0) return;                  // management
+  if (fr.fsub != 8 && fr.fsub != 5) return;   // beacon (8) or probe response (5)
+  const uint8_t* p = fr.p;
+  const int len = fr.len;
+  if (len < 38) return;
+  g_drone->beaconsSeen++;
+
+  // Tagged IEs start after the 24-byte header + 12-byte fixed beacon params.
+  int i = 36;
+  while (i + 2 <= len) {
+    const uint8_t tag = p[i];
+    const int ielen = p[i + 1];
+    if (i + 2 + ielen > len) break;
+    const uint8_t* ie = p + i + 2;
+    // Vendor-specific ASTM OpenDroneID: OUI FA:0B:BC, vendor type 0x0D, then a
+    // 1-byte message counter, then the message pack.
+    if (tag == 0xDD && ielen >= 6 && ie[0] == 0xFA && ie[1] == 0x0B && ie[2] == 0xBC && ie[3] == 0x0D) {
+      odidIngest(ie + 5, ielen - 5, p + 10, fr.rssi, fr.channel);
+    }
+    i += 2 + ielen;
+  }
+}
+
+// ---- Pwnagotchi beacon sniffer (passive) ----
+// A normal scanNetworks misses Pwnagotchi's sparse presence beacons, so the Threat
+// Sweep does a brief promiscuous beacon listen and flags the two signatures: a
+// DE:AD:BE:EF source/BSSID, or a JSON-identity payload in the SSID field.
+constexpr int PWN_MAX_SLOTS = 8;
+struct PwnHit {
+  bool used;
+  uint8_t mac[6];   // transmitter (addr2)
+  char ssid[24];    // SSID snippet (NUL-terminated)
+  int8_t rssi;
+};
+struct PwnScan {
+  volatile bool active;
+  PwnHit slots[PWN_MAX_SLOTS];
+  volatile uint32_t beacons;
+};
+std::unique_ptr<PwnScan> g_pwn;
+
+void pwnScanCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!g_pwn || !g_pwn->active) return;
+  if (type != WIFI_PKT_MGMT) return;
+  PromiscFrame fr;
+  if (!parsePromiscFrame(buf, fr)) return;
+  if (fr.ftype != 0) return;
+  if (fr.fsub != 8 && fr.fsub != 5) return;  // beacon / probe response
+  const uint8_t* p = fr.p;
+  const int len = fr.len;
+  if (len < 38) return;
+  g_pwn->beacons++;
+
+  const uint8_t* addr2 = p + 10;  // transmitter
+  const uint8_t* addr3 = p + 16;  // BSSID
+  auto isDeadBeef = [](const uint8_t* m) {
+    return m[0] == 0xDE && m[1] == 0xAD && m[2] == 0xBE && m[3] == 0xEF;
+  };
+  bool sig = isDeadBeef(addr2) || isDeadBeef(addr3);
+
+  // First IE is the SSID (tag 0) at offset 36.
+  char ssid[24] = {0};
+  if (p[36] == 0x00) {
+    int sl = p[37];
+    if (sl > static_cast<int>(sizeof(ssid)) - 1) sl = sizeof(ssid) - 1;
+    if (38 + sl <= len && sl > 0) memcpy(ssid, p + 38, sl);
+  }
+  if (!sig && ssid[0] == '{') sig = true;  // Pwnagotchi JSON identity payload
+
+  if (!sig) return;
+  for (auto& s : g_pwn->slots)
+    if (s.used && macEq(s.mac, addr2)) return;  // already recorded
+  for (auto& s : g_pwn->slots)
+    if (!s.used) {
+      s.used = true;
+      memcpy(s.mac, addr2, 6);
+      memcpy(s.ssid, ssid, sizeof(ssid));
+      s.rssi = fr.rssi;
+      break;
+    }
+}
+
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
 // ---- Active attacks (deauth / beacon flood) ----
 // Authorized testing only. Gated behind RADIO_AUDIT_ENABLE_ACTIVE + a one-time
@@ -1089,6 +1377,49 @@ std::string macVendor(const std::string& mac) {
   g_ouiCacheNext = (g_ouiCacheNext + 1) % OUI_CACHE_SIZE;
   return result;
 }
+
+std::string bleCompanyById(uint16_t id) {
+  for (const auto& e : g_bleCompCache)
+    if (e.valid && e.id == id) return std::string(e.name);
+
+  std::string result;  // empty = unknown / db absent
+  if (g_bleCompFile.isOpen() && g_bleCompCount > 0) {
+    int lo = 0, hi = static_cast<int>(g_bleCompCount) - 1;
+    uint8_t rec[BLECOMP_RECORD_SIZE];
+    while (lo <= hi) {
+      const int mid = lo + (hi - lo) / 2;
+      if (!g_bleCompFile.seek(BLECOMP_HEADER_SIZE + static_cast<size_t>(mid) * BLECOMP_RECORD_SIZE)) break;
+      if (g_bleCompFile.read(rec, BLECOMP_RECORD_SIZE) != static_cast<int>(BLECOMP_RECORD_SIZE)) break;
+      uint16_t key;
+      memcpy(&key, rec, 2);  // little-endian, matches gen_ble_companies.py
+      if (key == id) {
+        rec[BLECOMP_RECORD_SIZE - 1] = '\0';
+        result.assign(reinterpret_cast<const char*>(rec + 4));  // skip id(2)+pad(2)
+        break;
+      }
+      if (key < id)
+        lo = mid + 1;
+      else
+        hi = mid - 1;
+    }
+  }
+
+  BleCompCacheEntry& slot = g_bleCompCache[g_bleCompCacheNext];
+  slot.valid = true;
+  slot.id = id;
+  strncpy(slot.name, result.c_str(), sizeof(slot.name) - 1);
+  slot.name[sizeof(slot.name) - 1] = '\0';
+  g_bleCompCacheNext = (g_bleCompCacheNext + 1) % BLECOMP_CACHE_SIZE;
+  return result;
+}
+
+std::string bleVendorName(const std::string& manufacturerHex) {
+  if (manufacturerHex.size() < 4) return bleCompany(manufacturerHex);
+  const uint16_t id = static_cast<uint16_t>(strtol(manufacturerHex.substr(0, 2).c_str(), nullptr, 16)) |
+                      (static_cast<uint16_t>(strtol(manufacturerHex.substr(2, 2).c_str(), nullptr, 16)) << 8);
+  const std::string sd = bleCompanyById(id);
+  return sd.empty() ? bleCompany(manufacturerHex) : sd;  // SD db first, else built-in / "0xNNNN"
+}
 }  // namespace ra
 
 void RadioAuditActivity::onEnter() {
@@ -1117,7 +1448,8 @@ void RadioAuditActivity::onEnter() {
   probeFindings.reserve(PROBE_MAX);
   auditFindings.reserve(96);
 
-  ouiOpen();  // open the SD OUI database for vendor lookups (closed in onExit)
+  ouiOpen();      // open the SD OUI database for vendor lookups (closed in onExit)
+  bleCompOpen();  // open the SD BLE company-id database (closed in onExit)
 
   status = "Ready";
   requestUpdate();
@@ -1130,21 +1462,25 @@ void RadioAuditActivity::onExit() {
     g_pcap.active = false;
     if (g_hs) g_hs->active = false;
     if (g_dd) g_dd->active = false;
+    if (g_drone) g_drone->active = false;
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(nullptr);
     if (captureMode == CaptureMode::Pcap)
       pcapDrain(captureFile);
     else if (captureMode == CaptureMode::DeauthDetect)
       processDeauthDetect();
-    else
+    else if (captureMode == CaptureMode::Handshake)
       processHandshakes();
-    captureFile.flush();
-    captureFile.close();
+    if (captureFile.isOpen()) {
+      captureFile.flush();
+      captureFile.close();
+    }
     capturing = false;
     g_pcap.buf = nullptr;
     g_pcapBuf.reset();  // return the 32 KB ring to the heap
     g_hs.reset();       // return the handshake slot table to the heap
     g_dd.reset();       // return the detector slot table to the heap
+    g_drone.reset();    // return the drone slot table to the heap
   }
   if (locating) {
     locating = false;
@@ -1168,7 +1504,12 @@ void RadioAuditActivity::onExit() {
     WiFi.mode(WIFI_OFF);
   }
 #endif
-  ouiClose();  // close the SD OUI database handle
+  ouiClose();      // close the SD OUI database handle
+  bleCompClose();  // close the SD BLE company-id database handle
+  if (captureFile.isOpen()) {  // e.g. exited Scheduled Log without pressing Stop
+    captureFile.flush();
+    captureFile.close();
+  }
   WiFi.scanDelete();
   shutdownBleController();
 }
@@ -1186,6 +1527,7 @@ void RadioAuditActivity::loop() {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       if (captureMode == CaptureMode::Pcap) stopPcapCapture();
       else if (captureMode == CaptureMode::DeauthDetect) stopDeauthDetect();
+      else if (captureMode == CaptureMode::DroneScan) stopDroneScan();
       else stopHandshakeCapture();
       return;
     }
@@ -1198,6 +1540,10 @@ void RadioAuditActivity::loop() {
         stopDeauthDetect();
         return;
       }
+      if (captureMode == CaptureMode::DroneScan) {
+        stopDroneScan();
+        return;
+      }
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
       handshakeDeauthTarget();  // force the target to reconnect; channel locks on
       return;
@@ -1208,7 +1554,8 @@ void RadioAuditActivity::loop() {
     }
     if (captureMode == CaptureMode::Pcap) captureBytesWritten += pcapDrain(captureFile);
     else if (captureMode == CaptureMode::DeauthDetect) processDeauthDetect();
-    else processHandshakes();
+    else if (captureMode == CaptureMode::Handshake) processHandshakes();
+    // (DroneScan needs no per-tick processing -- the callback fills the slots.)
     const uint32_t now = millis();
     if (!captureChannelLocked && now - captureLastHopMs >= 300) {
       captureChannel = (captureChannel >= 13) ? 1 : static_cast<uint8_t>(captureChannel + 1);
@@ -1216,10 +1563,76 @@ void RadioAuditActivity::loop() {
       captureLastHopMs = now;
     }
     if (now - captureLastFlushMs >= 1500) {
-      captureFile.flush();
+      if (captureFile.isOpen()) captureFile.flush();
       captureLastFlushMs = now;
       requestUpdate();  // refresh on-screen counters
     }
+    return;
+  }
+
+  // Anti-Stalk Watch: re-scan BLE on an interval; Back/Confirm stops. The scan
+  // itself blocks (~4 s), so button presses register on the idle ticks between.
+  if (state == State::STALKING) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      stopAntiStalk();
+      return;
+    }
+    if (millis() - stalkLastPassMs >= STALK_INTERVAL_MS) antiStalkPass();
+    return;
+  }
+
+  if (state == State::GUARDIAN) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      stopGuardian();
+      return;
+    }
+    if (millis() - guardianLastMs >= GUARDIAN_INTERVAL_MS) guardianPass();
+    return;
+  }
+
+  if (state == State::LOG_SETUP) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      state = State::DONE;  // cancel -> back to the menu
+      requestUpdate();
+      return;
+    }
+    // Up/Down move between the three fields; Left/Right change the selected value.
+    if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+      logSetupField = (logSetupField + LOG_SETUP_FIELDS - 1) % LOG_SETUP_FIELDS;
+      requestUpdate();
+    } else if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+      logSetupField = (logSetupField + 1) % LOG_SETUP_FIELDS;
+      requestUpdate();
+    } else if (mappedInput.wasPressed(MappedInputManager::Button::Left) ||
+               mappedInput.wasPressed(MappedInputManager::Button::Right)) {
+      const int dir = mappedInput.wasPressed(MappedInputManager::Button::Right) ? 1 : -1;
+      int* sel = logSetupField == 0 ? &logIntervalSel : logSetupField == 1 ? &logDurationSel : &logRadioSel;
+      const int count =
+          logSetupField == 0 ? LOG_INTERVAL_COUNT : logSetupField == 1 ? LOG_DURATION_COUNT : LOG_RADIO_COUNT;
+      *sel = (*sel + dir + count) % count;
+      requestUpdate();
+    } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      logIntervalMs = static_cast<uint32_t>(LOG_INTERVAL_SECS[logIntervalSel]) * 1000;
+      startScheduledLog();
+    }
+    return;
+  }
+
+  if (state == State::LOGGING) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      stopScheduledLog();
+      return;
+    }
+    // Auto-stop once the chosen run-time elapses (0 = run until stopped).
+    const uint32_t durMs = LOG_DURATION_SECS[logDurationSel] * 1000;
+    if (durMs > 0 && millis() - logStartMs >= durMs) {
+      stopScheduledLog();
+      return;
+    }
+    if (millis() - logLastMs >= logIntervalMs) scanLogPass();
     return;
   }
 
@@ -1511,8 +1924,26 @@ void RadioAuditActivity::runAction(Action action) {
     case Action::AuditFindings: showAuditFindings(); return;
     case Action::WifiResults: showWifiDetails(); return;
     case Action::BleResults: showBleDetails(); return;
+    case Action::ReportViewer:
+      // Browse + read saved reports/captures on-device (TXT opens in the reader).
+      startActivityForResult(std::make_unique<FileBrowserActivity>(renderer, mappedInput, "/.radioink",
+                                                                   FileBrowserActivity::Mode::AllFiles),
+                             [this](const ActivityResult&) { requestUpdate(); });
+      return;
+    case Action::ShareWeb:
+      // Serve the findings as a web page: SoftAP captive portal + a Wi-Fi-join QR.
+      // Scan -> join -> the portal opens the report like a website.
+      startActivityForResult(
+          std::make_unique<WebReportActivity>(renderer, mappedInput, std::string(makeTextReport().c_str())),
+          [this](const ActivityResult&) { requestUpdate(); });
+      return;
     case Action::CameraSweep: startCameraSweep(); return;
     case Action::TrackerSweep: startTrackerSweep(); return;
+    case Action::ThreatSweep: startThreatSweep(); return;
+    case Action::AntiStalk: startAntiStalk(); return;
+    case Action::DroneScan: startDroneScan(); return;
+    case Action::Guardian: startGuardian(); return;
+    case Action::ScheduledLog: showLogSetup(); return;
     case Action::DeauthDetector: startDeauthDetect(); return;
     case Action::About: showAbout(); return;
     case Action::ExportText: exportText(); return;
@@ -1600,6 +2031,8 @@ void RadioAuditActivity::processWifiScan() {
     finding.seenCount = 1;
     finding.auth = authName(WiFi.encryptionType(i));
     finding.hidden = finding.ssid.empty();
+    const auto* rec = static_cast<const wifi_ap_record_t*>(WiFi.getScanInfoByIndex(i));
+    finding.wps = rec && rec->wps;
     mergeWifiFinding(std::move(finding));
   }
   std::sort(wifiFindings.begin(), wifiFindings.end(),
@@ -1685,12 +2118,92 @@ void RadioAuditActivity::absorbBleResults(BLEScanResults* results, int maxDevice
     finding.hasTxPower = device.haveTXPower();
     finding.txPower = finding.hasTxPower ? device.getTXPower() : 0;
     finding.manufacturerHex = device.haveManufacturerData() ? hexEncode(device.getManufacturerData()).c_str() : "";
+    if (device.haveServiceUUID()) finding.serviceUuid = device.getServiceUUID().toString().c_str();
     if (device.haveServiceData()) {
       finding.serviceDataUuid = device.getServiceDataUUID().toString().c_str();
       finding.serviceDataHex = hexEncode(device.getServiceData()).c_str();
     }
     mergeBleFinding(std::move(finding));
   }
+}
+
+void RadioAuditActivity::ingestStreamedAdvert(BLEAdvertisedDevice& device) {
+  // Same per-device merge as absorbBleResults, but driven one advert at a time
+  // from the streaming callback (the device is erased right after this returns).
+  BleFinding finding;
+  finding.address = device.getAddress().toString().c_str();
+  finding.name = device.haveName() ? device.getName().c_str() : "";
+  finding.rssi = device.getRSSI();
+  finding.rssiMin = finding.rssi;
+  finding.rssiMax = finding.rssi;
+  finding.rssiSum = finding.rssi;
+  finding.seenCount = 1;
+  finding.hasTxPower = device.haveTXPower();
+  finding.txPower = finding.hasTxPower ? device.getTXPower() : 0;
+  finding.manufacturerHex = device.haveManufacturerData() ? hexEncode(device.getManufacturerData()).c_str() : "";
+  if (device.haveServiceUUID()) finding.serviceUuid = device.getServiceUUID().toString().c_str();
+  if (device.haveServiceData()) {
+    finding.serviceDataUuid = device.getServiceDataUUID().toString().c_str();
+    finding.serviceDataHex = hexEncode(device.getServiceData()).c_str();
+  }
+  mergeBleFinding(std::move(finding));
+}
+
+namespace {
+// Streaming scan callback: hand each advert to the activity, then erase it from
+// the BLE result map so the map stays ~empty. With a passive scan the GAP handler
+// fires this synchronously per advert (no scan-response wait), so peak memory is
+// one device regardless of how hard a BLE-spam flood pushes.
+class StreamingScanCb : public BLEAdvertisedDeviceCallbacks {
+ public:
+  RadioAuditActivity* owner = nullptr;
+  BLEScan* scan = nullptr;
+  void onResult(BLEAdvertisedDevice dev) override {
+    if (owner) owner->ingestStreamedAdvert(dev);
+    if (scan) scan->erase(dev.getAddress());
+  }
+};
+StreamingScanCb g_streamCb;
+}  // namespace
+
+bool RadioAuditActivity::runBleScanStreaming(int windows) {
+  WiFi.scanDelete();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+  delay(200);
+
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("RADIO", "BLE pre-scan heap %u (streaming)", static_cast<unsigned>(freeHeap));
+  if (freeHeap < BLE_HEAP_FLOOR_START) {
+    LOG_ERR("RADIO", "BLE skipped: heap %u < %u", static_cast<unsigned>(freeHeap), BLE_HEAP_FLOOR_START);
+    return false;
+  }
+  if (!bleReady) {
+    BLEDevice::init("RadioInk");
+    bleScan = BLEDevice::getScan();
+    bleReady = true;
+  }
+  if (!bleScan) {
+    shutdownBleController();
+    return false;
+  }
+  g_streamCb.owner = this;
+  g_streamCb.scan = bleScan;
+  // Passive: the GAP handler reports each advert immediately (no scan-response
+  // wait), so the callback's erase keeps the result map from accumulating.
+  bleScan->setAdvertisedDeviceCallbacks(&g_streamCb, /*wantDuplicates=*/false, /*shouldParse=*/true);
+  bleScan->setActiveScan(false);
+  bleScan->setInterval(320);
+  bleScan->setWindow(80);
+  for (int w = 0; w < windows; w++) {
+    bleScan->start(2, false);
+    bleScan->clearResults();
+  }
+  bleScan->setAdvertisedDeviceCallbacks(nullptr);
+  g_streamCb.owner = nullptr;
+  g_streamCb.scan = nullptr;
+  shutdownBleController();
+  return true;
 }
 #endif
 
@@ -1750,6 +2263,7 @@ void RadioAuditActivity::mergeWifiFinding(WifiFinding&& finding) {
       existing.auth = finding.auth;
       existing.channel = finding.channel;
       existing.hidden = existing.hidden && finding.hidden;
+      existing.wps = existing.wps || finding.wps;
       return;
     }
   }
@@ -1778,6 +2292,7 @@ void RadioAuditActivity::mergeBleFinding(BleFinding&& finding) {
       if (existing.manufacturerHex.empty() && !finding.manufacturerHex.empty()) {
         existing.manufacturerHex = finding.manufacturerHex;
       }
+      if (existing.serviceUuid.empty() && !finding.serviceUuid.empty()) existing.serviceUuid = finding.serviceUuid;
       if (existing.serviceDataHex.empty() && !finding.serviceDataHex.empty()) {
         existing.serviceDataUuid = finding.serviceDataUuid;
         existing.serviceDataHex = finding.serviceDataHex;
@@ -1861,6 +2376,30 @@ void RadioAuditActivity::addAuditFinding(const char* severity, const std::string
   auditFindings.push_back(std::move(finding));
 }
 
+int RadioAuditActivity::bleSpamAdvertCount(std::string& dominantFamily) const {
+  static constexpr const char* kFamilies[] = {"Apple", "Swift Pair", "Fast Pair", "Samsung"};
+  int counts[4] = {};
+  for (const auto& b : bleFindings) {
+    const std::string adv =
+        decodeBleAdvert(b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex);
+    const std::string fam = bleSpamFamily(adv);
+    if (fam.empty()) continue;
+    for (int i = 0; i < 4; i++) {
+      if (fam == kFamilies[i]) {
+        counts[i]++;
+        break;
+      }
+    }
+  }
+  int total = 0, best = 0;
+  for (int i = 0; i < 4; i++) {
+    total += counts[i];
+    if (counts[i] > counts[best]) best = i;
+  }
+  dominantFamily = kFamilies[best];
+  return total;
+}
+
 void RadioAuditActivity::rebuildAuditFindings() {
   auditFindings.clear();
   loadWatchlist();
@@ -1869,12 +2408,7 @@ void RadioAuditActivity::rebuildAuditFindings() {
                            int wifiIndex = -1, int bleIndex = -1) {
     addAuditFinding(severity, title, detail, wifiIndex, bleIndex);
   };
-  auto onWatchlist = [this](const std::string& mac) {
-    const std::string up = upperStr(mac);
-    for (const auto& entry : watchlist)
-      if (!entry.empty() && up.find(entry) != std::string::npos) return true;
-    return false;
-  };
+  auto onWatchlist = [this](const std::string& mac) { return isWatchlisted(mac); };
 
   int channelCounts[15] = {};
   for (size_t wi = 0; wi < wifiFindings.size(); wi++) {
@@ -1900,6 +2434,10 @@ void RadioAuditActivity::rebuildAuditFindings() {
       addFinding("LOW", "Hidden SSID observed", w.bssid + " is hiding its SSID but still appears in scans.", wi);
     }
 
+    if (w.wps) {
+      addFinding("MED", "WPS enabled", base + " advertises WPS - exposed to PIN brute-force / Pixie-Dust.", wi);
+    }
+
     const std::string wifiVendor = macVendor(w.bssid);
     // SSID/vendor fingerprint first; fall back to the MAC OUI so cameras with a
     // hidden/renamed SSID (notably Flock Safety) still surface.
@@ -1911,6 +2449,11 @@ void RadioAuditActivity::rebuildAuditFindings() {
                  base + " matches camera sweep: " + cameraReason +
                      (wifiVendor.empty() ? "." : (" (" + wifiVendor + ").")),
                  wi);
+    }
+
+    const std::string pwn = pwnagotchiReason(w.ssid, w.bssid);
+    if (!pwn.empty()) {
+      addFinding("HIGH", "Pwnagotchi detected", base + " - " + pwn + ".", wi);
     }
 
     if (deepScanMode && w.seenCount < scanTotalPasses) {
@@ -1933,8 +2476,24 @@ void RadioAuditActivity::rebuildAuditFindings() {
       if (wifiFindings[j].ssid == wifiFindings[i].ssid) sameSsidCount++;
     }
     if (sameSsidCount > 1) {
-      addFinding("INFO", "Duplicate SSID", wifiFindings[i].ssid + " appears on " + std::to_string(sameSsidCount) +
-                                             " BSSIDs.");
+      // Mixed encryption across one SSID (e.g. an OPEN clone next to the real
+      // WPA2 AP) is a classic evil-twin / rogue-AP signal; uniform auth is more
+      // likely a legitimate mesh / range-extender.
+      bool mixedAuth = false;
+      for (size_t j = i + 1; j < wifiFindings.size(); j++) {
+        if (wifiFindings[j].ssid == wifiFindings[i].ssid && wifiFindings[j].auth != wifiFindings[i].auth) {
+          mixedAuth = true;
+          break;
+        }
+      }
+      if (mixedAuth) {
+        addFinding("HIGH", "Possible evil twin",
+                   wifiFindings[i].ssid + " is broadcast by " + std::to_string(sameSsidCount) +
+                       " BSSIDs with different encryption - a rogue clone may be present.");
+      } else {
+        addFinding("INFO", "Duplicate SSID",
+                   wifiFindings[i].ssid + " appears on " + std::to_string(sameSsidCount) + " BSSIDs.");
+      }
     }
   }
 
@@ -1957,6 +2516,24 @@ void RadioAuditActivity::rebuildAuditFindings() {
       addFinding("MED", "Possible security camera",
                  label + " matches camera sweep: " + cameraReason + ".", -1, bi);
     }
+    const std::string bleThreat =
+        bleThreatReason(b.name, b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex);
+    if (!bleThreat.empty()) {
+      const bool skimmer = bleThreat.find("skimmer") != std::string::npos;
+      addFinding(skimmer ? "HIGH" : "MED", skimmer ? "Possible card skimmer" : "Notable BLE device",
+                 label + " - " + bleThreat + ".", -1, bi);
+    }
+    const std::string drone = droneBleReason(b.manufacturerHex, b.serviceUuid, b.serviceDataUuid);
+    if (!drone.empty()) {
+      addFinding("MED", "Drone Remote ID", label + " - " + drone + " (OpenDroneID).", -1, bi);
+    }
+    const std::string bleRelay = bleRelayReason(b.rssiMin, b.rssiMax, b.seenCount);
+    if (!bleRelay.empty()) {
+      addFinding("LOW", "BLE RSSI anomaly",
+                 label + " - " + bleRelay + " (" + std::to_string(b.rssiMin) + "/" + std::to_string(b.rssiMax) +
+                     " dBm over " + std::to_string(b.seenCount) + " sightings).",
+                 -1, bi);
+    }
     if (b.rssi >= -55) {
       addFinding("MED", "Close BLE device",
                  label + " is nearby at avg " + std::to_string(b.rssi) + " dBm, seen " +
@@ -1972,6 +2549,18 @@ void RadioAuditActivity::rebuildAuditFindings() {
     }
     if (deepScanMode && b.seenCount < scanTotalPasses) {
       addFinding("INFO", "Intermittent BLE device", label + " was not visible in every scan pass.", -1, bi);
+    }
+  }
+
+  // BLE pairing-popup flood (Flipper Zero / phone-app spam): an abnormal number of
+  // distinct pairing adverts in one sweep, not tied to any single device.
+  {
+    std::string spamFamily;
+    const int spam = bleSpamAdvertCount(spamFamily);
+    if (spam >= BLE_SPAM_THRESHOLD) {
+      addAuditFinding("HIGH", "BLE pairing spam",
+                      std::to_string(spam) + " BLE pairing/popup adverts (" + spamFamily +
+                          " dominant) - likely a Flipper Zero / app BLE spam flood.");
     }
   }
 
@@ -2190,7 +2779,7 @@ void RadioAuditActivity::buildCameraTargets() {
   for (const auto& b : bleFindings) {
     const std::string label = b.name.empty() ? std::string("<unnamed>") : b.name;
     const std::string advType = decodeBleAdvert(b.manufacturerHex, b.serviceDataUuid, b.serviceDataHex);
-    const std::string vendor = bleCompany(b.manufacturerHex);
+    const std::string vendor = bleVendorName(b.manufacturerHex);
     std::string reason = cameraFingerprintReason(label + " " + advType, vendor);
     if (reason.empty()) reason = cameraVendorReason(vendor);
     if (reason.empty()) continue;
@@ -2386,6 +2975,730 @@ void RadioAuditActivity::startTrackerSweep() {
   showingDetails = false;
   showingFindings = false;
   requestUpdate();
+}
+
+void RadioAuditActivity::startThreatSweep() {
+  // Passive signature sweep: a WiFi AP scan (Pwnagotchi beacons, Axon cameras)
+  // plus an active BLE scan (Flipper Zero, card-skimmer BT modules, Meshtastic
+  // nodes, and RSSI relay/spoof anomalies). Read-only -- nothing transmitted.
+  wifiFindings.clear();
+  bleFindings.clear();
+  scanTotalPasses = 1;
+  scanCurrentPass = 1;
+  deepScanMode = false;
+  state = State::WIFI_SCANNING;
+  status = "Threat sweep: WiFi...";
+  requestUpdateAndWait();
+
+  prepWifiSta();
+  // Active scan, matching the proven Camera Sweep path. (A passive long-dwell scan
+  // catches more transient APs but retains more heap going into BLEDevice::init,
+  // which transiently needs ~65 KB and was aborting on bad_alloc here. Pwnagotchi's
+  // sparse beacons are caught by the promiscuous listen below instead.)
+  const int n = WiFi.scanNetworks(false, true);
+  for (int i = 0; i < n; i++) {
+    WifiFinding f;
+    f.ssid = WiFi.SSID(i).c_str();
+    f.bssid = WiFi.BSSIDstr(i).c_str();
+    f.rssi = WiFi.RSSI(i);
+    f.rssiMin = f.rssiMax = f.rssiSum = f.rssi;
+    f.channel = WiFi.channel(i);
+    f.seenCount = 1;
+    f.auth = authName(WiFi.encryptionType(i));
+    f.hidden = f.ssid.empty();
+    mergeWifiFinding(std::move(f));
+  }
+  WiFi.scanDelete();
+
+  // Promiscuous Pwnagotchi listen: catch the sparse presence beacons a quick scan
+  // misses (DE:AD:BE:EF source/BSSID or a JSON-identity SSID), channel-hopping ~3 s.
+  status = "Threat sweep: beacons...";
+  requestUpdateAndWait();
+  g_pwn = makeUniqueNoThrow<PwnScan>();
+  if (g_pwn) {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(&pwnScanCb);
+    wifi_promiscuous_filter_t filter = {};
+    filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous(true);
+    g_pwn->active = true;
+    for (int round = 0; round < 2; round++) {
+      for (uint8_t ch = 1; ch <= 13; ch++) {
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        delay(110);
+      }
+    }
+    g_pwn->active = false;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+  }
+
+  state = State::BLE_SCANNING;
+  status = "Threat sweep: BLE...";
+  requestUpdateAndWait();
+#if defined(RADIO_AUDIT_ENABLE_BLE)
+  // Streaming (flood-safe) scan: a BLE-spam flood would OOM the normal accumulating
+  // scan. Passive, so Flipper is still caught via its 0x3082 service UUID (which
+  // rides in the primary advert, not the scan response).
+  runBleScanStreaming(/*windows=*/3);
+#endif
+
+  std::sort(bleFindings.begin(), bleFindings.end(),
+            [](const BleFinding& a, const BleFinding& b) { return a.rssi > b.rssi; });
+  scanTime = timeStamp();
+  state = State::DONE;
+
+  targetTitle = "Threat Sweep";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetLocatable = false;
+  int hits = 0;
+
+  // WiFi-side signatures: Pwnagotchi beacons + Axon (body/in-car) cameras.
+  for (const auto& w : wifiFindings) {
+    const std::string ssid = w.ssid.empty() ? std::string("<hidden>") : w.ssid;
+    std::string reason = pwnagotchiReason(w.ssid, w.bssid);
+    if (reason.empty()) {
+      const std::string vendor = macVendor(w.bssid);
+      std::string cam = cameraFingerprintReason(w.ssid, vendor);
+      if (cam.empty()) cam = cameraMacReason(w.bssid);
+      if (cam.empty()) cam = cameraVendorReason(vendor);
+      if (cam.find("Axon") != std::string::npos || cam.find("TASER") != std::string::npos) reason = cam;
+    }
+    if (reason.empty()) continue;
+    hits++;
+    targetLines.push_back(reason);
+    targetLines.push_back("  " + ssid + "  " + w.bssid);
+    targetLines.push_back("  CH" + std::to_string(w.channel) + "  " + std::to_string(w.rssi) + " dBm");
+  }
+
+  // Pwnagotchi promiscuous-beacon hits (the sparse beacons a scan misses).
+  if (g_pwn) {
+    for (const auto& s : g_pwn->slots) {
+      if (!s.used) continue;
+      hits++;
+      targetLines.push_back("Pwnagotchi beacon");
+      targetLines.push_back("  " + macToString(s.mac) + "  " + std::to_string(s.rssi) + " dBm");
+      if (s.ssid[0]) targetLines.push_back(std::string("  SSID: ") + s.ssid);
+    }
+    g_pwn.reset();
+  }
+
+  // BLE-side signatures: Flipper / skimmer / Meshtastic, then RSSI relay anomaly.
+  for (const auto& b : bleFindings) {
+    std::string reason =
+        bleThreatReason(b.name, b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex);
+    if (reason.empty()) reason = droneBleReason(b.manufacturerHex, b.serviceUuid, b.serviceDataUuid);
+    if (reason.empty()) reason = bleRelayReason(b.rssiMin, b.rssiMax, b.seenCount);
+    if (reason.empty()) continue;
+    hits++;
+    targetLines.push_back(reason);
+    targetLines.push_back("  " + (b.name.empty() ? b.address : b.name) + "  " + std::to_string(b.rssi) + " dBm");
+    if (!b.name.empty()) targetLines.push_back("  " + b.address);
+  }
+
+  // BLE pairing-popup flood (aggregate, not per-device).
+  {
+    std::string spamFamily;
+    const int spam = bleSpamAdvertCount(spamFamily);
+    if (spam >= BLE_SPAM_THRESHOLD) {
+      hits++;
+      targetLines.push_back("BLE pairing spam (" + spamFamily + ")");
+      targetLines.push_back("  " + std::to_string(spam) + " pairing adverts - possible Flipper/app flood");
+    }
+  }
+
+  if (hits == 0) {
+    targetLines.push_back("No known threats detected.");
+    targetLines.push_back("Scanned " + std::to_string(wifiFindings.size()) + " APs, " +
+                          std::to_string(bleFindings.size()) + " BLE devices.");
+  } else {
+    targetLines.insert(targetLines.begin(), std::to_string(hits) + " threat signature(s)");
+  }
+  status = std::string("Threats: ") + std::to_string(hits);
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+bool RadioAuditActivity::isWatchlisted(const std::string& mac) const {
+  const std::string up = upperStr(mac);
+  for (const auto& entry : watchlist)
+    if (!entry.empty() && up.find(entry) != std::string::npos) return true;
+  return false;
+}
+
+void RadioAuditActivity::startAntiStalk() {
+  loadWatchlist();  // refresh in case the user edited watchlist.txt
+  stalkTable.clear();
+  stalkTable.reserve(STALK_MAX);
+  stalkPassCount = 0;
+  stalkLastPassMs = 0;  // forces an immediate first pass
+  state = State::STALKING;
+  status = "Anti-Stalk: scanning...";
+  showingTarget = false;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdateAndWait();
+  antiStalkPass();  // first pass now so the screen isn't empty
+}
+
+void RadioAuditActivity::antiStalkPass() {
+  stalkPassCount++;
+  status = std::string("Anti-Stalk: pass ") + std::to_string(stalkPassCount) + "...";
+  requestUpdateAndWait();
+
+  bleFindings.clear();
+#if defined(RADIO_AUDIT_ENABLE_BLE)
+  runBleScanStreaming(/*windows=*/1);  // one window keeps each pass short + Stop responsive
+#endif
+  // Stop pressed during the scan? Bail now instead of finishing the pass.
+  mappedInput.update();
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    stopAntiStalk();
+    return;
+  }
+
+  for (auto& e : stalkTable) e.seenThisPass = false;
+
+  for (const auto& b : bleFindings) {
+    StalkEntry* slot = nullptr;
+    for (auto& e : stalkTable)
+      if (e.addr == b.address) {
+        slot = &e;
+        break;
+      }
+    if (!slot) {
+      if (stalkTable.size() < STALK_MAX) {
+        stalkTable.emplace_back();
+        slot = &stalkTable.back();
+        slot->addr = b.address;
+      } else {
+        // Table full: reuse a transient entry (seen once, absent now) if any.
+        for (auto& e : stalkTable)
+          if (!e.seenThisPass && e.passesSeen <= 1) {
+            e = StalkEntry{};
+            e.addr = b.address;
+            slot = &e;
+            break;
+          }
+        if (!slot) continue;  // keep established followers; drop this newcomer
+      }
+    }
+    slot->seenThisPass = true;
+    slot->passesSeen++;
+    slot->passesMissed = 0;
+    slot->rssi = b.rssi;
+    slot->label = b.name.empty() ? bleVendorName(b.manufacturerHex) : b.name;
+    const std::string tr = trackerReason(b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid,
+                                         b.serviceDataHex, b.name);
+    slot->tracker = !tr.empty();
+    if (slot->tracker) slot->kind = tr;
+    slot->watchlisted = isWatchlisted(b.address);
+  }
+
+  // Age out devices that have dropped off; keep confirmed followers longer.
+  for (auto& e : stalkTable)
+    if (!e.seenThisPass) e.passesMissed++;
+  stalkTable.erase(std::remove_if(stalkTable.begin(), stalkTable.end(),
+                                  [](const StalkEntry& e) {
+                                    return e.passesMissed > STALK_FORGET && e.passesSeen < STALK_THRESHOLD;
+                                  }),
+                   stalkTable.end());
+
+  int followers = 0;
+  for (const auto& e : stalkTable)
+    if (e.passesSeen >= STALK_THRESHOLD) followers++;
+  status = std::string("Pass ") + std::to_string(stalkPassCount) + " - " + std::to_string(followers) + " follower(s)";
+  stalkLastPassMs = millis();
+  requestUpdate();
+}
+
+void RadioAuditActivity::stopAntiStalk() {
+  shutdownBleController();
+  WiFi.mode(WIFI_OFF);
+
+  // Sort by persistence (most-seen first) for the summary.
+  std::sort(stalkTable.begin(), stalkTable.end(),
+            [](const StalkEntry& a, const StalkEntry& b) { return a.passesSeen > b.passesSeen; });
+
+  targetTitle = "Anti-Stalk Watch";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetLocatable = false;
+  int followers = 0;
+  targetLines.push_back(std::to_string(stalkPassCount) + " passes, " + std::to_string(stalkTable.size()) +
+                        " devices tracked");
+  for (const auto& e : stalkTable) {
+    if (e.passesSeen < STALK_THRESHOLD) continue;
+    followers++;
+    const char* tag = e.watchlisted ? "[WATCHLIST] " : (e.tracker ? "[TRACKER] " : "[FOLLOW] ");
+    targetLines.push_back(tag + (e.label.empty() ? e.addr : e.label));
+    targetLines.push_back("  " + e.addr + "  seen " + std::to_string(e.passesSeen) + "/" +
+                          std::to_string(stalkPassCount) + "  " + std::to_string(e.rssi) + " dBm");
+    if (e.tracker && !e.kind.empty()) targetLines.push_back("  " + e.kind);
+  }
+  if (followers == 0) {
+    targetLines.push_back("No persistent followers detected.");
+    targetLines.push_back("Note: AirTags rotate their MAC, which");
+    targetLines.push_back("can reset the per-device pass count.");
+  }
+
+  scanTime = timeStamp();
+  state = State::DONE;
+  status = std::string("Followers: ") + std::to_string(followers);
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+void RadioAuditActivity::renderAntiStalk() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  renderer.clearScreen();
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int x = metrics.contentSidePadding;
+
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "Anti-Stalk Watch",
+                 status.c_str());
+
+  // Followers first, then the rest by persistence.
+  std::vector<const StalkEntry*> sorted;
+  sorted.reserve(stalkTable.size());
+  for (const auto& e : stalkTable) sorted.push_back(&e);
+  std::sort(sorted.begin(), sorted.end(),
+            [](const StalkEntry* a, const StalkEntry* b) { return a->passesSeen > b->passesSeen; });
+
+  int followers = 0;
+  for (const auto* e : sorted)
+    if (e->passesSeen >= STALK_THRESHOLD) followers++;
+
+  int y = contentTop;
+  renderer.drawText(UI_12_FONT_ID, x, y,
+                    (String("Pass ") + stalkPassCount + "   Tracked: " + (int)stalkTable.size() +
+                     "   Followers: " + followers)
+                        .c_str(),
+                    true, EpdFontFamily::BOLD);
+  y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
+
+  const int lineH = renderer.getLineHeight(SMALL_FONT_ID) + 4;
+  const int footerReserve = metrics.headerHeight + 24;  // leave room for the button hints
+  const int maxRows = (renderer.getScreenHeight() - y - footerReserve) / lineH;
+  int rows = 0;
+  for (const auto* e : sorted) {
+    if (rows >= maxRows) break;
+    const char* tag = e->watchlisted ? "[W] " : (e->tracker ? "[T] " : (e->passesSeen >= STALK_THRESHOLD ? "* " : ""));
+    const String line = String(tag) + (e->label.empty() ? e->addr.c_str() : e->label.c_str()) + "  " +
+                        e->passesSeen + "/" + stalkPassCount + "  " + e->rssi + "dBm";
+    renderer.drawText(SMALL_FONT_ID, x, y,
+                      renderer.truncatedText(SMALL_FONT_ID, line.c_str(), pageWidth - x * 2).c_str());
+    y += lineH;
+    rows++;
+  }
+  if (rows == 0) {
+    renderer.drawText(SMALL_FONT_ID, x, y, "Watching... walk around for a few passes.");
+  }
+
+  const auto labels = mappedInput.mapLabels("Stop", "Stop", "", "");
+  UITheme::getInstance().suppressBrandLogoOnce();
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}
+
+void RadioAuditActivity::startGuardian() {
+  loadWatchlist();
+  stalkTable.clear();
+  stalkTable.reserve(STALK_MAX);
+  guardianThreats.clear();
+  guardianThreats.reserve(16);
+  guardianRound = 0;
+  guardianAlertPeak = 0;
+  guardianLastMs = 0;  // forces an immediate first round
+  state = State::GUARDIAN;
+  status = "Guardian: starting...";
+  showingTarget = false;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdateAndWait();
+  guardianPass();
+}
+
+void RadioAuditActivity::guardianPass() {
+  guardianRound++;
+  guardianThreats.clear();
+  bool stopReq = false;  // set if Stop is pressed mid-round so we bail promptly
+  status = std::string("Guardian: round ") + std::to_string(guardianRound) + "...";
+  requestUpdateAndWait();
+
+  // --- BLE phase: flood-safe scan, then classify threats + persistence ---
+  bleFindings.clear();
+#if defined(RADIO_AUDIT_ENABLE_BLE)
+  runBleScanStreaming(/*windows=*/1);  // one window keeps the round short + Stop responsive
+#endif
+  mappedInput.update();
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Confirm))
+    stopReq = true;
+
+  std::string spamFam;
+  const int spamCount = bleSpamAdvertCount(spamFam);
+  if (spamCount >= BLE_SPAM_THRESHOLD)
+    guardianThreats.push_back("BLE pairing spam x" + std::to_string(spamCount) + " (" + spamFam + ")");
+
+  for (auto& e : stalkTable) e.seenThisPass = false;
+  for (const auto& b : bleFindings) {
+    const std::string label = b.name.empty() ? b.address : b.name;
+    const std::string threat =
+        bleThreatReason(b.name, b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex);
+    if (!threat.empty()) guardianThreats.push_back(threat + " - " + label);
+    const std::string drone = droneBleReason(b.manufacturerHex, b.serviceUuid, b.serviceDataUuid);
+    if (!drone.empty()) guardianThreats.push_back(drone + " - " + label);
+
+    // Persistence: track watchlisted MACs and item-trackers across rounds.
+    const std::string tr =
+        trackerReason(b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex, b.name);
+    if (isWatchlisted(b.address) || !tr.empty()) {
+      StalkEntry* slot = nullptr;
+      for (auto& e : stalkTable)
+        if (e.addr == b.address) {
+          slot = &e;
+          break;
+        }
+      if (!slot && stalkTable.size() < STALK_MAX) {
+        stalkTable.emplace_back();
+        slot = &stalkTable.back();
+        slot->addr = b.address;
+      }
+      if (slot) {
+        slot->seenThisPass = true;
+        slot->passesSeen++;
+        slot->passesMissed = 0;
+        slot->rssi = b.rssi;
+        slot->label = label;
+        slot->tracker = !tr.empty();
+        if (slot->tracker) slot->kind = tr;
+        slot->watchlisted = isWatchlisted(b.address);
+      }
+    }
+  }
+  for (auto& e : stalkTable)
+    if (!e.seenThisPass) e.passesMissed++;
+  stalkTable.erase(std::remove_if(stalkTable.begin(), stalkTable.end(),
+                                  [](const StalkEntry& e) {
+                                    return e.passesMissed > STALK_FORGET && e.passesSeen < STALK_THRESHOLD;
+                                  }),
+                   stalkTable.end());
+  for (const auto& e : stalkTable)
+    if (e.passesSeen >= STALK_THRESHOLD)
+      guardianThreats.push_back(std::string(e.watchlisted ? "WATCHLIST following: " : "Tracker following: ") +
+                                (e.label.empty() ? e.addr : e.label));
+
+  // --- Wi-Fi phase: brief promiscuous listen for a deauth/disassoc flood ---
+  // Skipped if Stop was already pressed during/after the BLE phase.
+  if (!stopReq && (g_dd = makeUniqueNoThrow<DeauthDetect>())) {
+    prepWifiSta();
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(&deauthDetectCb);
+    wifi_promiscuous_filter_t filter = {};
+    filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous(true);
+    g_dd->active = true;
+    uint8_t ch = 1;
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    const uint32_t start = millis();
+    uint32_t lastHop = start;
+    while (millis() - start < GUARDIAN_DEAUTH_WINDOW_MS) {
+      delay(40);  // yields so the promiscuous callback can fill g_dd
+      mappedInput.update();  // poll Stop so the user isn't stuck waiting out the window
+      if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+          mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+        stopReq = true;
+        break;
+      }
+      if (millis() - lastHop >= 180) {
+        ch = (ch >= 13) ? 1 : static_cast<uint8_t>(ch + 1);
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        lastHop = millis();
+      }
+    }
+    g_dd->active = false;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+    for (const auto& s : g_dd->slots) {
+      if (!s.used) continue;
+      const uint16_t total = static_cast<uint16_t>(s.deauthCount + s.disassocCount);
+      if (total >= DD_ALERT_THRESHOLD) guardianThreats.push_back("Deauth flood from " + macToString(s.src));
+    }
+    g_dd.reset();
+    WiFi.mode(WIFI_OFF);
+    delay(50);
+  }
+
+  if (stopReq) {  // Stop pressed mid-round -> end now instead of finishing the round
+    stopGuardian();
+    return;
+  }
+
+  // Severity for the persistent banner: any active threat is at least caution;
+  // followers / floods / spam / Flipper escalate to a full alert.
+  int sev = guardianThreats.empty() ? 0 : 1;
+  for (const auto& t : guardianThreats)
+    if (t.find("following") != std::string::npos || t.find("Deauth") != std::string::npos ||
+        t.find("spam") != std::string::npos || t.find("Flipper") != std::string::npos)
+      sev = 2;
+  if (sev > guardianAlertPeak) guardianAlertPeak = sev;
+
+  status = guardianThreats.empty() ? "All clear"
+                                   : (std::to_string(guardianThreats.size()) + " active threat(s)");
+  guardianLastMs = millis();
+  requestUpdate();
+}
+
+void RadioAuditActivity::stopGuardian() {
+  if (g_dd) {
+    g_dd->active = false;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+    g_dd.reset();
+  }
+  shutdownBleController();
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+
+  targetTitle = "Guardian Mode";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetLocatable = false;
+  targetLines.push_back(std::to_string(guardianRound) + " rounds monitored");
+  targetLines.push_back(guardianAlertPeak >= 2  ? "Peak: THREAT detected"
+                        : guardianAlertPeak == 1 ? "Peak: caution"
+                                                 : "Peak: all clear");
+  if (!guardianThreats.empty()) {
+    targetLines.push_back("Last round:");
+    for (const auto& t : guardianThreats) targetLines.push_back("  " + t);
+  }
+  scanTime = timeStamp();
+  state = State::DONE;
+  status = guardianAlertPeak >= 2 ? "Guardian: threats seen" : "Guardian stopped";
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+void RadioAuditActivity::renderGuardian() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  renderer.clearScreen();
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int x = metrics.contentSidePadding;
+
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "Guardian Mode",
+                 status.c_str());
+
+  int y = contentTop;
+  if (guardianThreats.empty()) {
+    renderer.drawText(UI_12_FONT_ID, x, y, (String("Round ") + guardianRound + "   -   ALL CLEAR").c_str(), true,
+                      EpdFontFamily::BOLD);
+    y += renderer.getLineHeight(UI_12_FONT_ID) + 12;
+    renderer.drawText(SMALL_FONT_ID, x, y, "Monitoring BLE + Wi-Fi. Leave it running.");
+  } else {
+    const int barH = renderer.getLineHeight(UI_12_FONT_ID) + 12;
+    renderer.fillRect(x, y, pageWidth - x * 2, barH, true);  // inverted alert banner
+    renderer.drawText(UI_12_FONT_ID, x + 8, y + 6,
+                      (String("! ") + (int)guardianThreats.size() + " THREAT(S) DETECTED").c_str(), false,
+                      EpdFontFamily::BOLD);
+    y += barH + 10;
+    const int lineH = renderer.getLineHeight(SMALL_FONT_ID) + 4;
+    const int maxRows = (renderer.getScreenHeight() - y - metrics.headerHeight - 24) / lineH;
+    int rows = 0;
+    for (const auto& t : guardianThreats) {
+      if (rows >= maxRows) break;
+      renderer.drawText(SMALL_FONT_ID, x, y,
+                        renderer.truncatedText(SMALL_FONT_ID, ("- " + t).c_str(), pageWidth - x * 2).c_str());
+      y += lineH;
+      rows++;
+    }
+  }
+
+  const auto labels = mappedInput.mapLabels("Stop", "Stop", "", "");
+  UITheme::getInstance().suppressBrandLogoOnce();
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}
+
+void RadioAuditActivity::showLogSetup() {
+  state = State::LOG_SETUP;
+  status = "Scan interval";
+  showingTarget = false;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+void RadioAuditActivity::renderLogSetup() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  renderer.clearScreen();
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "Scheduled Log", "Configure");
+
+  const int x = metrics.contentSidePadding;
+  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+
+  const char* names[LOG_SETUP_FIELDS] = {"Interval", "Run for", "Radios"};
+  const char* values[LOG_SETUP_FIELDS] = {LOG_INTERVAL_LABELS[logIntervalSel], LOG_DURATION_LABELS[logDurationSel],
+                                          LOG_RADIO_LABELS[logRadioSel]};
+  const int rowH = renderer.getLineHeight(UI_12_FONT_ID) + 16;
+  for (int i = 0; i < LOG_SETUP_FIELDS; i++) {
+    const bool sel = (i == logSetupField);
+    if (sel) renderer.fillRect(x, y - 4, pageWidth - x * 2, rowH, true);
+    char row[72];
+    // Selected row brackets the value to cue Left/Right adjustment.
+    snprintf(row, sizeof(row), "%s:  %s%s%s", names[i], sel ? "< " : "", values[i], sel ? " >" : "");
+    renderer.drawText(UI_12_FONT_ID, x + 12, y + 4, row, !sel, EpdFontFamily::BOLD);
+    y += rowH;
+  }
+  y += 10;
+  renderer.drawText(SMALL_FONT_ID, x, y, "Up/Down: field   Left/Right: change value");
+
+  const auto labels = mappedInput.mapLabels("Cancel", "Start", "Up", "Down");
+  UITheme::getInstance().suppressBrandLogoOnce();
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}
+
+void RadioAuditActivity::startScheduledLog() {
+  Storage.ensureDirectoryExists(HS_DIR);
+  capturePath = std::string(HS_DIR) + "/log-" + std::to_string(millis() / 1000) + ".csv";
+  if (!Storage.openFileForWrite("RADIO", capturePath, captureFile)) {
+    LOG_ERR("RADIO", "Log: cannot open %s", capturePath.c_str());
+    status = "Scheduled log: SD open failed";
+    state = State::ERROR;
+    requestUpdate();
+    return;
+  }
+  const std::string hdr = "time,type,id,name,rssi,channel,detail\n";
+  captureFile.write(reinterpret_cast<const uint8_t*>(hdr.data()), hdr.size());
+  logCycles = 0;
+  logEntries = 0;
+  logLastMs = 0;  // forces an immediate first cycle
+  logStartMs = millis();
+  state = State::LOGGING;
+  status = "Scheduled log: starting...";
+  showingTarget = false;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdateAndWait();
+  scanLogPass();
+}
+
+void RadioAuditActivity::scanLogPass() {
+  logCycles++;
+  status = std::string("Logging: cycle ") + std::to_string(logCycles) + "...";
+  requestUpdateAndWait();
+  const std::string ts = timeStamp();
+  char line[200];
+
+  // --- Wi-Fi cycle (skipped in BLE-only mode) ---
+  if (logRadioSel != 2) {
+    prepWifiSta();
+    const int n = WiFi.scanNetworks(false, true);
+    for (int i = 0; i < n; i++) {
+      snprintf(line, sizeof(line), "%s,WIFI,%s,%s,%d,%d,%s\n", ts.c_str(), WiFi.BSSIDstr(i).c_str(),
+               csvEscape(std::string(WiFi.SSID(i).c_str())).c_str(), static_cast<int>(WiFi.RSSI(i)),
+               static_cast<int>(WiFi.channel(i)), authName(WiFi.encryptionType(i)).c_str());
+      captureFile.write(reinterpret_cast<const uint8_t*>(line), strlen(line));
+      logEntries++;
+    }
+    WiFi.scanDelete();
+  }
+
+  // Stop pressed during the (blocking) Wi-Fi scan? Bail now.
+  mappedInput.update();
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    stopScheduledLog();
+    return;
+  }
+
+  // --- BLE cycle (flood-safe; skipped in WiFi-only mode) ---
+  if (logRadioSel != 1) {
+    bleFindings.clear();
+#if defined(RADIO_AUDIT_ENABLE_BLE)
+    runBleScanStreaming(/*windows=*/1);
+#endif
+    for (const auto& b : bleFindings) {
+      snprintf(line, sizeof(line), "%s,BLE,%s,%s,%d,,%s\n", ts.c_str(), b.address.c_str(),
+               csvEscape(b.name).c_str(), b.rssi, csvEscape(bleVendorName(b.manufacturerHex)).c_str());
+      captureFile.write(reinterpret_cast<const uint8_t*>(line), strlen(line));
+      logEntries++;
+    }
+  }
+
+  captureFile.flush();
+  logLastMs = millis();
+  status = std::string("Logged ") + std::to_string(logEntries) + " over " + std::to_string(logCycles) + " cycle(s)";
+  requestUpdate();
+}
+
+void RadioAuditActivity::stopScheduledLog() {
+  shutdownBleController();
+  if (captureFile.isOpen()) {
+    captureFile.flush();
+    captureFile.close();
+  }
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+
+  targetTitle = "Scheduled Log";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetLocatable = false;
+  targetLines.push_back(std::to_string(logCycles) + " cycle(s), " + std::to_string(logEntries) + " entries");
+  targetLines.push_back("Saved: " + capturePath);
+  scanTime = timeStamp();
+  state = State::DONE;
+  status = std::string("Logged ") + std::to_string(logEntries) + " entries";
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+void RadioAuditActivity::renderScheduledLog() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  renderer.clearScreen();
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int x = metrics.contentSidePadding;
+
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "Scheduled Log",
+                 status.c_str());
+
+  int y = contentTop;
+  renderer.drawText(UI_12_FONT_ID, x, y, (String("Cycle ") + logCycles + "   Entries: " + logEntries).c_str(), true,
+                    EpdFontFamily::BOLD);
+  y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
+  renderer.drawText(SMALL_FONT_ID, x, y, ("Last: " + timeStamp()).c_str());
+  y += renderer.getLineHeight(SMALL_FONT_ID) + 6;
+  renderer.drawText(SMALL_FONT_ID, x, y, (String("Scanning every ") + (int)(logIntervalMs / 1000) + "s").c_str());
+  y += renderer.getLineHeight(SMALL_FONT_ID) + 6;
+  renderer.drawText(SMALL_FONT_ID, x, y,
+                    renderer.truncatedText(SMALL_FONT_ID, capturePath.c_str(), pageWidth - x * 2).c_str());
+
+  const auto labels = mappedInput.mapLabels("Stop", "Stop", "", "");
+  UITheme::getInstance().suppressBrandLogoOnce();
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
 }
 
 #if defined(RADIO_AUDIT_ENABLE_BLE)
@@ -2654,7 +3967,7 @@ void RadioAuditActivity::deepScanBleTarget(int index) {
   targetLines.push_back(address);
   targetLines.push_back("Name: " + (name.empty() ? std::string("<unnamed>") : name));
   if (!advType.empty()) targetLines.push_back("Type: " + advType);
-  targetLines.push_back("Vendor: " + bleCompany(manufacturer));
+  targetLines.push_back("Vendor: " + bleVendorName(manufacturer));
   if (!randomAddress) {
     const std::string macVend = macVendor(address);
     if (!macVend.empty() && macVend != "randomized") targetLines.push_back("MAC vendor: " + macVend);
@@ -2662,7 +3975,10 @@ void RadioAuditActivity::deepScanBleTarget(int index) {
   targetLines.push_back("RSSI avg " + std::to_string(avg) + " (" + std::to_string(lo) + "/" + std::to_string(hi) +
                         ")  seen " + std::to_string(samples) + "/3");
   if (hasTxPower) targetLines.push_back("TX power: " + std::to_string(txPower));
-  if (!services.empty()) targetLines.push_back("Service: " + services);
+  if (!services.empty()) {
+    const std::string svcName = bleServiceName(services);
+    targetLines.push_back("Service: " + services + (svcName.empty() ? "" : (" (" + svcName + ")")));
+  }
   if (!manufacturer.empty()) targetLines.push_back("Mfr data: " + manufacturer);
   targetLines.push_back(std::string("Random address: ") + (randomAddress ? "Y" : "N"));
 
@@ -3211,6 +4527,146 @@ void RadioAuditActivity::renderDeauthDetect() {
 
   const auto labels = mappedInput.mapLabels("Stop", "Stop", "", "");
   UITheme::getInstance().suppressBrandLogoOnce();  // live data view: no brand logo
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}
+
+void RadioAuditActivity::startDroneScan() {
+  captureMode = CaptureMode::DroneScan;
+  g_drone = makeUniqueNoThrow<DroneScanState>();  // zero-initialized on the heap
+  if (!g_drone) {
+    LOG_ERR("RADIO", "Drone: OOM slot table");
+    status = "Drone scan: out of memory";
+    state = State::ERROR;
+    requestUpdate();
+    return;
+  }
+
+  status = "Watching for drone Remote ID...";
+  requestUpdateAndWait();
+  prepWifiSta();
+
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(&droneScanCb);
+  wifi_promiscuous_filter_t filter = {};
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  esp_wifi_set_promiscuous_filter(&filter);
+  esp_wifi_set_promiscuous(true);
+  captureChannel = 1;
+  esp_wifi_set_channel(captureChannel, WIFI_SECOND_CHAN_NONE);
+
+  g_drone->active = true;
+  capturing = true;
+  captureChannelLocked = false;
+  captureLastHopMs = millis();
+  captureLastFlushMs = millis();
+  state = State::CAPTURING;
+  requestUpdate();
+}
+
+void RadioAuditActivity::stopDroneScan() {
+  if (!capturing) return;
+  if (g_drone) g_drone->active = false;
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+
+  // Snapshot the detections before freeing the slot table.
+  targetTitle = "Drone RID Scan";
+  targetLines.clear();
+  int found = 0;
+  uint32_t beacons = 0, odid = 0;
+  if (g_drone) {
+    beacons = g_drone->beaconsSeen;
+    odid = g_drone->odidFrames;
+    for (const auto& d : g_drone->slots) {
+      if (!d.used) continue;
+      found++;
+      targetLines.push_back(std::string(d.haveId && d.id[0] ? d.id : "(no ID)") + "  " +
+                            std::to_string(d.rssi) + " dBm");
+      char ua[40];
+      snprintf(ua, sizeof(ua), "  UA type %u  CH%u  %s", d.uaType, d.channel, macToString(d.mac).c_str());
+      targetLines.push_back(ua);
+      if (d.haveLoc) {
+        char loc[64];
+        snprintf(loc, sizeof(loc), "  %.6f, %.6f  alt %dm", d.latE7 / 1e7, d.lonE7 / 1e7, d.altM);
+        targetLines.push_back(loc);
+      }
+    }
+  }
+  if (found == 0) {
+    targetLines.push_back("No drone Remote ID seen.");
+    targetLines.push_back(std::string("Beacons scanned: ") + std::to_string(beacons));
+    targetLines.push_back("Covers Wi-Fi OpenDroneID (ASTM F3411).");
+    targetLines.push_back("BLE Remote ID shows in BLE/Threat scans.");
+  } else {
+    targetLines.insert(targetLines.begin(),
+                       std::to_string(found) + " drone(s), " + std::to_string(odid) + " RID frames");
+  }
+
+  capturing = false;
+  g_drone.reset();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+
+  scanTime = timeStamp();
+  state = State::DONE;
+  status = std::string("Drones: ") + std::to_string(found);
+  targetScroll = 0;
+  targetFromList = false;
+  targetLocatable = false;
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+void RadioAuditActivity::renderDroneScan() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  renderer.clearScreen();
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int x = metrics.contentSidePadding;
+
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "Drone RID Scan",
+                 status.c_str());
+
+  uint32_t beacons = 0, odid = 0;
+  int drones = 0;
+  if (g_drone) {
+    beacons = g_drone->beaconsSeen;
+    odid = g_drone->odidFrames;
+    for (const auto& d : g_drone->slots)
+      if (d.used) drones++;
+  }
+
+  int y = contentTop;
+  renderer.drawText(UI_12_FONT_ID, x, y, (String("Drones: ") + drones + "   RID frames: " + (int)odid).c_str(), true,
+                    EpdFontFamily::BOLD);
+  y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
+  renderer.drawText(UI_12_FONT_ID, x, y, (String("Channel: ") + captureChannel + "   Beacons: " + (int)beacons).c_str(),
+                    true, EpdFontFamily::BOLD);
+  y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
+
+  const int lineH = renderer.getLineHeight(SMALL_FONT_ID) + 4;
+  if (g_drone) {
+    for (const auto& d : g_drone->slots) {
+      if (!d.used) continue;
+      String line = String(d.haveId && d.id[0] ? d.id : "(no ID)") + "  " + d.rssi + "dBm";
+      if (d.haveLoc) {
+        char loc[40];
+        snprintf(loc, sizeof(loc), "  %.5f,%.5f", d.latE7 / 1e7, d.lonE7 / 1e7);
+        line += loc;
+      }
+      renderer.drawText(SMALL_FONT_ID, x, y,
+                        renderer.truncatedText(SMALL_FONT_ID, line.c_str(), pageWidth - x * 2).c_str());
+      y += lineH;
+    }
+  }
+  if (drones == 0) renderer.drawText(SMALL_FONT_ID, x, y, "Listening for OpenDroneID beacons...");
+
+  const auto labels = mappedInput.mapLabels("Stop", "Stop", "", "");
+  UITheme::getInstance().suppressBrandLogoOnce();
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
 }
@@ -4245,7 +5701,28 @@ void RadioAuditActivity::render(RenderLock&&) {
   if (state == State::CAPTURING) {
     if (captureMode == CaptureMode::Pcap) renderCapture();
     else if (captureMode == CaptureMode::DeauthDetect) renderDeauthDetect();
+    else if (captureMode == CaptureMode::DroneScan) renderDroneScan();
     else renderHandshake();
+    return;
+  }
+
+  if (state == State::STALKING) {
+    renderAntiStalk();
+    return;
+  }
+
+  if (state == State::GUARDIAN) {
+    renderGuardian();
+    return;
+  }
+
+  if (state == State::LOG_SETUP) {
+    renderLogSetup();
+    return;
+  }
+
+  if (state == State::LOGGING) {
+    renderScheduledLog();
     return;
   }
 
