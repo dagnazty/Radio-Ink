@@ -1,31 +1,41 @@
 #include "RadioAuditActivity.h"
 
+#include <ESPmDNS.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <WiFiClient.h>
+#include <WiFiUdp.h>
 #include <esp_random.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
-
-#include <memory>
+#include <lwip/etharp.h>
+#include <lwip/ip_addr.h>
+#include <lwip/netif.h>
+#include <lwip/tcpip.h>
+#include <ping/ping_sock.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "MappedInputManager.h"
 #include "RadioAuditHelpers.h"
 #include "activities/home/FileBrowserActivity.h"
+#include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "activities/util/WebReportActivity.h"
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
 #include "activities/util/EvilTwinActivity.h"
 #endif
+#include "RadioInkSettings.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/RadioInkSkull.h"
@@ -54,15 +64,15 @@ constexpr int ACTION_COUNT = static_cast<int>(Action::COUNT);
 
 // Leaf action labels, indexed by the Action enum value (order must match).
 constexpr const char* ACTION_LABELS[ACTION_COUNT] = {
-    "Quick Scan",        "Deep Scan",     "WiFi Scan",         "BLE Scan",
-    "Client Recon (probes)", "Channel usage", "Audit Findings",    "View WiFi results",
-    "View BLE results",  "Camera Sweep",  "Save text report",  "Save CSV report",
-    "Save JSON report",  "Save WiGLE CSV",    "Live PCAP capture",
-    "Handshake/PMKID",   "Deauth (all APs)",  "Deauth selected",   "Beacon flood",
-    "Evil Twin / Portal", "Tracker Sweep",    "Deauth Detector",   "BLE Spoof",
-    "Karma / Probe Resp", "Deauth Cameras",   "Threat Sweep",      "Anti-Stalk Watch",
-    "Drone RID Scan",    "View Reports",      "Share Findings (web)", "Guardian Mode",
-    "Scheduled Log",     "About Radio Ink"};
+    "Quick Scan",       "Deep Scan",        "WiFi Scan",         "BLE Scan",           "Client Recon (probes)",
+    "Channel usage",    "Audit Findings",   "View WiFi results", "View BLE results",   "Camera Sweep",
+    "Save text report", "Save CSV report",  "Save JSON report",  "Save WiGLE CSV",     "Live PCAP capture",
+    "Handshake/PMKID",  "Deauth (all APs)", "Deauth selected",   "Beacon flood",       "Evil Twin / Portal",
+    "Tracker Sweep",    "Deauth Detector",  "BLE Spoof",         "Karma / Probe Resp", "Deauth Cameras",
+    "Threat Sweep",     "Anti-Stalk Watch", "Drone RID Scan",    "View Reports",       "Share Findings (web)",
+    "Guardian Mode",    "Scheduled Log",    "About Radio Ink",   "mDNS Browser",       "LAN Scanner",
+    "NTP Time Sync",    "Network Info",     "Port Probe",        "Subnet Calculator",  "Traceroute",
+    "Rogue DHCP Probe", "SNMP Sweep",       "WPS Audit",         "System Stats",       "I2C Scan"};
 
 const char* actionLabel(Action a) { return ACTION_LABELS[static_cast<int>(a)]; }
 
@@ -71,8 +81,10 @@ UIIcon actionIcon(Action a) {
     case Action::ExportText:
     case Action::ExportCsv:
     case Action::ExportJson:
-    case Action::ExportWigle: return UIIcon::File;
-    default: return UIIcon::Wifi;
+    case Action::ExportWigle:
+      return UIIcon::File;
+    default:
+      return UIIcon::Wifi;
   }
 }
 
@@ -87,24 +99,28 @@ struct ActionCategory {
 };
 // Category item lists, grouped by intent. CAT_ENTRY derives the count from the
 // array so it can never drift out of sync when items are added/removed.
-#define CAT_ENTRY(name, arr, icon) \
-  { name, arr, static_cast<int>(sizeof(arr) / sizeof((arr)[0])), icon }
+#define CAT_ENTRY(name, arr, icon) {name, arr, static_cast<int>(sizeof(arr) / sizeof((arr)[0])), icon}
 
 // Scan: enumerate what's around.
-constexpr Action CAT_SCAN_ITEMS[] = {Action::QuickScan,   Action::DeepScan,    Action::WifiScan,
-                                     Action::BleScan,     Action::ClientRecon, Action::ChannelUsage};
+constexpr Action CAT_SCAN_ITEMS[] = {Action::QuickScan, Action::DeepScan,    Action::WifiScan,
+                                     Action::BleScan,   Action::ClientRecon, Action::ChannelUsage};
+// Network: L3 reconnaissance that requires associating to an AP first (except
+// Subnet Calculator, which is a pure offline calculator).
+constexpr Action CAT_NETWORK_ITEMS[] = {Action::MdnsBrowse, Action::LanScan,   Action::NtpSync,
+                                        Action::NetInfo,    Action::PortProbe, Action::SubnetCalc,
+                                        Action::Traceroute, Action::DhcpProbe, Action::SnmpSweep};
 // Detect: passive threat / signature monitors.
-constexpr Action CAT_DETECT_ITEMS[] = {Action::Guardian,    Action::ThreatSweep, Action::CameraSweep,
-                                       Action::TrackerSweep, Action::AntiStalk,   Action::DroneScan,
+constexpr Action CAT_DETECT_ITEMS[] = {Action::Guardian,      Action::ThreatSweep, Action::CameraSweep,
+                                       Action::TrackerSweep,  Action::AntiStalk,   Action::DroneScan,
                                        Action::DeauthDetector};
 // Capture: stream to SD.
 constexpr Action CAT_CAPTURE_ITEMS[] = {Action::CapturePcap, Action::CaptureHandshake, Action::ScheduledLog};
 // Results: review on-device.
 constexpr Action CAT_RESULTS_ITEMS[] = {Action::AuditFindings, Action::WifiResults,  Action::BleResults,
-                                        Action::ReportViewer,  Action::ShareWeb};
+                                        Action::WpsAudit,      Action::ReportViewer, Action::ShareWeb,
+                                        Action::SystemStats,   Action::I2cScan};
 // Export: save reports to SD.
-constexpr Action CAT_EXPORT_ITEMS[] = {Action::ExportText, Action::ExportCsv, Action::ExportJson,
-                                       Action::ExportWigle};
+constexpr Action CAT_EXPORT_ITEMS[] = {Action::ExportText, Action::ExportCsv, Action::ExportJson, Action::ExportWigle};
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
 // Attacks: active/transmitting, dev builds only.
 constexpr Action CAT_ATTACK_ITEMS[] = {Action::DeauthAttack, Action::DeauthSelected, Action::DeauthCameras,
@@ -113,6 +129,7 @@ constexpr Action CAT_ATTACK_ITEMS[] = {Action::DeauthAttack, Action::DeauthSelec
 #endif
 constexpr ActionCategory ACTION_CATEGORIES[] = {
     CAT_ENTRY("Scan", CAT_SCAN_ITEMS, UIIcon::Wifi),
+    CAT_ENTRY("Network", CAT_NETWORK_ITEMS, UIIcon::Hotspot),
     CAT_ENTRY("Detect", CAT_DETECT_ITEMS, UIIcon::Bookmark),
     CAT_ENTRY("Capture", CAT_CAPTURE_ITEMS, UIIcon::Transfer),
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
@@ -123,18 +140,63 @@ constexpr ActionCategory ACTION_CATEGORIES[] = {
 };
 constexpr int CATEGORY_COUNT = sizeof(ACTION_CATEGORIES) / sizeof(ACTION_CATEGORIES[0]);
 
+// mDNS service types the browser enumerates, one per query pass. ESPmDNS prepends
+// the leading underscore itself, so the bare label is fine. queryService() blocks
+// ~3 s each (the IDF's fixed mdns_query_ptr timeout), so they run one-per-tick.
+struct MdnsService {
+  const char* svc;
+  const char* proto;
+  const char* label;
+};
+constexpr MdnsService MDNS_SERVICES[] = {
+    {"http", "tcp", "HTTP"},        {"https", "tcp", "HTTPS"}, {"ipp", "tcp", "Printer"}, {"raop", "tcp", "AirPlay"},
+    {"googlecast", "tcp", "Cast"},  {"rtsp", "tcp", "Camera"}, {"ssh", "tcp", "SSH"},     {"smb", "tcp", "SMB"},
+    {"workstation", "tcp", "Host"}, {"hap", "tcp", "HomeKit"},
+};
+constexpr int MDNS_SERVICE_COUNT = sizeof(MDNS_SERVICES) / sizeof(MDNS_SERVICES[0]);
+constexpr size_t MDNS_MAX_RESULTS = 48;  // cap discovered services (bounds DRAM)
+constexpr int MDNS_MAX_TXT = 12;         // cap TXT records kept per service
+
+constexpr int LAN_BATCH = 12;          // ARP who-has requests sent per loop tick
+constexpr int LAN_DRAIN_TICKS = 6;     // extra ticks after the sweep to catch late replies
+constexpr size_t LAN_MAX_HOSTS = 128;  // cap discovered hosts (bounds DRAM)
+
 constexpr int QUICK_SCAN_PASSES = 1;
 constexpr int DEEP_SCAN_PASSES = 3;
 constexpr size_t MAX_WIFI_FINDINGS = 64;
-constexpr size_t MAX_BLE_FINDINGS = 24;
+constexpr size_t MAX_BLE_FINDINGS = 32;
 // Heap floors for BLE. START is checked BEFORE BLEDevice::init (which itself
 // eats ~65 KB for the controller). ABORT is checked between scan windows, so it
 // must sit well below the *post-init* baseline (~25 KB free) or it trips before
 // the first window ever runs -- only bail when heap is genuinely critical.
 constexpr uint32_t BLE_HEAP_FLOOR_START = 50000;
 constexpr uint32_t BLE_HEAP_FLOOR_ABORT = 9000;
+// Tracker "play sound" GATT — three protocols, tried newest-first. A modern AirTag
+// uses the cross-industry DULT (unwanted-tracker) service or the FMNA (Find My
+// accessory) service; only older AirTags respond to the legacy 7DFC900x/0xAF write.
+// Each control-point characteristic must be subscribed for indications/notifications
+// before the sound command is written, and the connect must use the address TYPE seen
+// in the advert.
+//
+// Attribution: this tracker "play sound" support is BASED ON the ESP32Marauder project
+// by justcallmekoko (https://github.com/justcallmekoko/ESP32Marauder, GPL-3.0) — the
+// three-protocol approach, the DULT/FMNA/legacy service & characteristic UUIDs, the
+// command bytes, and the subscribe-before-write + observed-address-type requirements
+// all come from studying that work. This is an independent reimplementation for Radio
+// Ink's Bluedroid BLE stack (Marauder uses NimBLE); credit for the technique is his.
+constexpr char DULT_SOUND_SERVICE[] = "15190001-12f4-c226-88ed-2ac5579f2a85";
+constexpr char DULT_SOUND_CHAR[] = "8e0c0001-1d68-fb92-bf61-48377421680e";
+constexpr uint8_t DULT_SOUND_START[] = {0x00, 0x03};
+constexpr uint8_t DULT_SOUND_STOP[] = {0x01, 0x03};
+constexpr char FMNA_SOUND_SERVICE[] = "0000fd44-0000-1000-8000-00805f9b34fb";
+constexpr char FMNA_SOUND_CHAR[] = "4f860003-943b-49ef-bed4-2f730304427a";
+constexpr uint8_t FMNA_SOUND_START[] = {0x01, 0x00, 0x03};
+constexpr uint8_t FMNA_SOUND_STOP[] = {0x01, 0x01, 0x03};
+constexpr char AIRTAG_SOUND_SERVICE[] = "7dfc9000-7d1c-4951-86aa-8d9728f8d66c";
+constexpr char AIRTAG_SOUND_CHAR[] = "7dfc9001-7d1c-4951-86aa-8d9728f8d66c";
+constexpr uint8_t AIRTAG_SOUND_START[] = {0xAF};
 // BLE pairing-popup adverts seen in one sweep before we call it a spam flood.
-// bleFindings is capped at MAX_BLE_FINDINGS (24), so during a real Flipper/app
+// bleFindings is capped at MAX_BLE_FINDINGS (32), so during a real Flipper/app
 // flood nearly every slot fills with pairing adverts; 8 is a safe trip point.
 constexpr int BLE_SPAM_THRESHOLD = 8;
 // Anti-Stalk Watch tuning.
@@ -143,7 +205,7 @@ constexpr int STALK_MAX = 24;                  // tracked devices (bounded)
 constexpr int STALK_THRESHOLD = 3;             // passes seen before "following you"
 constexpr int STALK_FORGET = 3;                // consecutive misses before eviction
 // Guardian Mode tuning.
-constexpr uint32_t GUARDIAN_INTERVAL_MS = 2000;  // gap between monitor rounds
+constexpr uint32_t GUARDIAN_INTERVAL_MS = 2000;       // gap between monitor rounds
 constexpr uint32_t GUARDIAN_DEAUTH_WINDOW_MS = 2500;  // promiscuous deauth-flood listen per round
 // Scheduled Log setup presets, chosen on the setup form.
 constexpr int LOG_INTERVAL_SECS[] = {15, 30, 60, 300, 600};
@@ -177,8 +239,8 @@ constexpr size_t OUI_NAME_FIELD = 28;
 constexpr size_t OUI_RECORD_SIZE = 4 + OUI_NAME_FIELD;  // 32 bytes
 constexpr int OUI_CACHE_SIZE = 24;                      // recent lookups (hits + misses)
 
-HalFile g_ouiFile;          // open for the activity lifetime (onEnter..onExit)
-uint32_t g_ouiCount = 0;    // record count from the file header, 0 if unavailable
+HalFile g_ouiFile;        // open for the activity lifetime (onEnter..onExit)
+uint32_t g_ouiCount = 0;  // record count from the file header, 0 if unavailable
 
 struct OuiCacheEntry {
   uint32_t oui;
@@ -404,24 +466,32 @@ void targetPromiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
 
   if (ftype == 0) {  // management
     g_targetCap.mgmtFrames++;
-    if (fsub == 12) g_targetCap.deauthFrames++;       // deauthentication
-    else if (fsub == 10) g_targetCap.disassocFrames++;  // disassociation
-    if (fsub == 8 || fsub == 5) {  // beacon or probe response
+    if (fsub == 12)
+      g_targetCap.deauthFrames++;  // deauthentication
+    else if (fsub == 10)
+      g_targetCap.disassocFrames++;  // disassociation
+    if (fsub == 8 || fsub == 5) {    // beacon or probe response
       g_targetCap.beaconCount++;
       if (len >= 24 + 12) {
         const uint16_t cap = p[24 + 10] | (p[24 + 11] << 8);
         if (cap & 0x0010) g_targetCap.privacy = true;  // Privacy bit
-        uint16_t idx = 24 + 12;                          // skip fixed params
+        uint16_t idx = 24 + 12;                        // skip fixed params
         while (idx + 2 <= len) {
           const uint8_t tag = p[idx];
           const uint8_t tlen = p[idx + 1];
           if (idx + 2 + tlen > len) break;
           const uint8_t* d = p + idx + 2;
-          if (tag == 48) {  // RSN IE -> walk to RSN capabilities for MFP bits
-            uint16_t o = 2;                                  // version
-            if (o + 4 <= tlen) o += 4;                       // group cipher
-            if (o + 2 <= tlen) { uint16_t c = d[o] | (d[o + 1] << 8); o += 2 + 4 * c; }  // pairwise
-            if (o + 2 <= tlen) { uint16_t c = d[o] | (d[o + 1] << 8); o += 2 + 4 * c; }  // akm
+          if (tag == 48) {              // RSN IE -> walk to RSN capabilities for MFP bits
+            uint16_t o = 2;             // version
+            if (o + 4 <= tlen) o += 4;  // group cipher
+            if (o + 2 <= tlen) {
+              uint16_t c = d[o] | (d[o + 1] << 8);
+              o += 2 + 4 * c;
+            }  // pairwise
+            if (o + 2 <= tlen) {
+              uint16_t c = d[o] | (d[o + 1] << 8);
+              o += 2 + 4 * c;
+            }  // akm
             if (o + 2 <= tlen) {
               const uint16_t rsncap = d[o] | (d[o + 1] << 8);
               if (rsncap & 0x00C0) g_targetCap.pmf = true;  // MFPC/MFPR
@@ -436,9 +506,14 @@ void targetPromiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     targetAddClient(macEq(a1, g_targetCap.bssid) ? a2 : a1);
   } else if (ftype == 2) {  // data
     g_targetCap.dataFrames++;
-    if (toDS && !fromDS) targetAddClient(a2);
-    else if (!toDS && fromDS) targetAddClient(a1);
-    else { targetAddClient(a1); targetAddClient(a2); }
+    if (toDS && !fromDS)
+      targetAddClient(a2);
+    else if (!toDS && fromDS)
+      targetAddClient(a1);
+    else {
+      targetAddClient(a1);
+      targetAddClient(a2);
+    }
   }
 }
 
@@ -505,7 +580,6 @@ std::string wigleAuth(const std::string& auth) {
   if (auth == "WPA2/WPA3") return "[WPA2-PSK-CCMP][WPA3-SAE-CCMP][ESS]";
   return std::string("[") + auth + "][ESS]";
 }
-
 
 // ---- Probe-request harvesting (channel-hopping promiscuous capture) ----
 constexpr int PROBE_MAX = 48;
@@ -621,9 +695,9 @@ void clientPromiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
 constexpr const char* CAPTURE_DIR = "/.radioink/captures";
 constexpr uint32_t PCAP_RING_SIZE = 32768;  // 2^15, must stay a power of two
 constexpr uint32_t PCAP_RING_MASK = PCAP_RING_SIZE - 1;
-constexpr uint32_t PCAP_SNAPLEN = 2304;       // max 802.11 MTU we record per frame
-constexpr uint32_t PCAP_LINKTYPE = 105;       // LINKTYPE_IEEE802_11 (raw frames)
-constexpr uint32_t PCAP_RECORD_HEADER = 16;   // ts_sec, ts_usec, incl_len, orig_len
+constexpr uint32_t PCAP_SNAPLEN = 2304;      // max 802.11 MTU we record per frame
+constexpr uint32_t PCAP_LINKTYPE = 105;      // LINKTYPE_IEEE802_11 (raw frames)
+constexpr uint32_t PCAP_RECORD_HEADER = 16;  // ts_sec, ts_usec, incl_len, orig_len
 
 struct PcapRing {
   volatile bool active;
@@ -735,7 +809,6 @@ struct HandshakeCapture {
 };
 std::unique_ptr<HandshakeCapture> g_hs;  // allocated only during a handshake capture
 
-
 HsSsidEntry* hsFindSsid(const uint8_t* bssid) {
   for (auto& e : g_hs->ssids)
     if (e.used && macEq(e.bssid, bssid)) return &e;
@@ -792,8 +865,8 @@ void hsWritePmkidLine(HalFile& file, const HsSlot& s, const char* ssid) {
   file.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
 }
 void hsWriteEapolLine(HalFile& file, const HsSlot& s, const char* ssid) {
-  const std::string line = "WPA*02*" + bytesToHex(s.mic, 16) + "*" + bytesToHex(s.ap, 6) + "*" +
-                           bytesToHex(s.sta, 6) + "*" + strToHex(ssid) + "*" + bytesToHex(s.anonce, 32) + "*" +
+  const std::string line = "WPA*02*" + bytesToHex(s.mic, 16) + "*" + bytesToHex(s.ap, 6) + "*" + bytesToHex(s.sta, 6) +
+                           "*" + strToHex(ssid) + "*" + bytesToHex(s.anonce, 32) + "*" +
                            bytesToHex(s.eapol, s.eapolLen) + "*00\n";
   file.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
 }
@@ -993,14 +1066,14 @@ constexpr int DRONE_MAX_SLOTS = 8;
 
 struct DroneEntry {
   bool used;
-  uint8_t mac[6];     // beacon transmitter (addr2)
-  char id[21];        // ODID UAS ID (serial), NUL-terminated
-  uint8_t uaType;     // UA type (0..15)
+  uint8_t mac[6];  // beacon transmitter (addr2)
+  char id[21];     // ODID UAS ID (serial), NUL-terminated
+  uint8_t uaType;  // UA type (0..15)
   bool haveId;
   bool haveLoc;
-  int32_t latE7;      // latitude  * 1e7 (degrees)
-  int32_t lonE7;      // longitude * 1e7
-  int16_t altM;       // geodetic altitude (m)
+  int32_t latE7;  // latitude  * 1e7 (degrees)
+  int32_t lonE7;  // longitude * 1e7
+  int16_t altM;   // geodetic altitude (m)
   volatile int8_t rssi;
   volatile uint8_t channel;
 };
@@ -1087,8 +1160,8 @@ void droneScanCb(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT) return;
   PromiscFrame fr;
   if (!parsePromiscFrame(buf, fr)) return;
-  if (fr.ftype != 0) return;                  // management
-  if (fr.fsub != 8 && fr.fsub != 5) return;   // beacon (8) or probe response (5)
+  if (fr.ftype != 0) return;                 // management
+  if (fr.fsub != 8 && fr.fsub != 5) return;  // beacon (8) or probe response (5)
   const uint8_t* p = fr.p;
   const int len = fr.len;
   if (len < 38) return;
@@ -1117,8 +1190,8 @@ void droneScanCb(void* buf, wifi_promiscuous_pkt_type_t type) {
 constexpr int PWN_MAX_SLOTS = 8;
 struct PwnHit {
   bool used;
-  uint8_t mac[6];   // transmitter (addr2)
-  char ssid[24];    // SSID snippet (NUL-terminated)
+  uint8_t mac[6];  // transmitter (addr2)
+  char ssid[24];   // SSID snippet (NUL-terminated)
   int8_t rssi;
 };
 struct PwnScan {
@@ -1142,9 +1215,7 @@ void pwnScanCb(void* buf, wifi_promiscuous_pkt_type_t type) {
 
   const uint8_t* addr2 = p + 10;  // transmitter
   const uint8_t* addr3 = p + 16;  // BSSID
-  auto isDeadBeef = [](const uint8_t* m) {
-    return m[0] == 0xDE && m[1] == 0xAD && m[2] == 0xBE && m[3] == 0xEF;
-  };
+  auto isDeadBeef = [](const uint8_t* m) { return m[0] == 0xDE && m[1] == 0xAD && m[2] == 0xBE && m[3] == 0xEF; };
   bool sig = isDeadBeef(addr2) || isDeadBeef(addr3);
 
   // First IE is the SSID (tag 0) at offset 36.
@@ -1213,8 +1284,12 @@ int sendBeaconFlood(uint8_t channel, int rounds) {
     g_beaconFrame[i++] = 0x00;  // duration
     g_beaconFrame[i++] = 0x00;
     for (int j = 0; j < 6; j++) g_beaconFrame[i++] = 0xFF;  // DA broadcast
-    const uint8_t src[6] = {0x00, 0x16, 0x3e, static_cast<uint8_t>(esp_random()),
-                            static_cast<uint8_t>(esp_random()), static_cast<uint8_t>(esp_random())};
+    const uint8_t src[6] = {0x00,
+                            0x16,
+                            0x3e,
+                            static_cast<uint8_t>(esp_random()),
+                            static_cast<uint8_t>(esp_random()),
+                            static_cast<uint8_t>(esp_random())};
     memcpy(g_beaconFrame + i, src, 6);  // SA
     i += 6;
     memcpy(g_beaconFrame + i, src, 6);  // BSSID
@@ -1432,8 +1507,13 @@ void RadioAuditActivity::onEnter() {
   showingFindings = false;
   showingTarget = false;
   showingCameraList = false;
+  showingMdnsList = false;
+  targetFromMdnsList = false;
+  mdnsResults.clear();
+  mdnsSel = 0;
   targetMenuOpen = false;
   targetIsCamera = false;
+  targetIsFindMy = false;
   locating = false;
   targetLocatable = false;
   clientFindings.clear();
@@ -1444,9 +1524,11 @@ void RadioAuditActivity::onEnter() {
   // throwing bad_alloc -> abort(). Caps match the merge-time limits.
   wifiFindings.reserve(MAX_WIFI_FINDINGS);
   bleFindings.reserve(MAX_BLE_FINDINGS);
-  clientFindings.reserve(CLIENT_MAX);
-  probeFindings.reserve(PROBE_MAX);
-  auditFindings.reserve(96);
+  // Do NOT reserve clientFindings/probeFindings/auditFindings here: they stay empty
+  // through the WiFi/BLE scan but their reserves (~16 KB) would be held during it,
+  // leaving the BLE scan only ~3 KB free (BLEDevice::init eats ~72 KB) -> bad_alloc
+  // -> abort() in a dense area. They fill later (report build / client recon), when
+  // BLE is down and heap is free, so on-demand growth there is safe.
 
   ouiOpen();      // open the SD OUI database for vendor lookups (closed in onExit)
   bleCompOpen();  // open the SD BLE company-id database (closed in onExit)
@@ -1504,8 +1586,14 @@ void RadioAuditActivity::onExit() {
     WiFi.mode(WIFI_OFF);
   }
 #endif
-  ouiClose();      // close the SD OUI database handle
-  bleCompClose();  // close the SD BLE company-id database handle
+  if (mdnsActive) {  // exited mid-query: stop the responder and drop the association
+    MDNS.end();
+    mdnsActive = false;
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+  }
+  ouiClose();                  // close the SD OUI database handle
+  bleCompClose();              // close the SD BLE company-id database handle
   if (captureFile.isOpen()) {  // e.g. exited Scheduled Log without pressing Stop
     captureFile.flush();
     captureFile.close();
@@ -1525,10 +1613,14 @@ void RadioAuditActivity::loop() {
   // in-screen deauth to force a handshake (no need to leave the screen).
   if (state == State::CAPTURING) {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      if (captureMode == CaptureMode::Pcap) stopPcapCapture();
-      else if (captureMode == CaptureMode::DeauthDetect) stopDeauthDetect();
-      else if (captureMode == CaptureMode::DroneScan) stopDroneScan();
-      else stopHandshakeCapture();
+      if (captureMode == CaptureMode::Pcap)
+        stopPcapCapture();
+      else if (captureMode == CaptureMode::DeauthDetect)
+        stopDeauthDetect();
+      else if (captureMode == CaptureMode::DroneScan)
+        stopDroneScan();
+      else
+        stopHandshakeCapture();
       return;
     }
     if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
@@ -1552,9 +1644,12 @@ void RadioAuditActivity::loop() {
       return;
 #endif
     }
-    if (captureMode == CaptureMode::Pcap) captureBytesWritten += pcapDrain(captureFile);
-    else if (captureMode == CaptureMode::DeauthDetect) processDeauthDetect();
-    else if (captureMode == CaptureMode::Handshake) processHandshakes();
+    if (captureMode == CaptureMode::Pcap)
+      captureBytesWritten += pcapDrain(captureFile);
+    else if (captureMode == CaptureMode::DeauthDetect)
+      processDeauthDetect();
+    else if (captureMode == CaptureMode::Handshake)
+      processHandshakes();
     // (DroneScan needs no per-tick processing -- the callback fills the slots.)
     const uint32_t now = millis();
     if (!captureChannelLocked && now - captureLastHopMs >= 300) {
@@ -1609,8 +1704,9 @@ void RadioAuditActivity::loop() {
                mappedInput.wasPressed(MappedInputManager::Button::Right)) {
       const int dir = mappedInput.wasPressed(MappedInputManager::Button::Right) ? 1 : -1;
       int* sel = logSetupField == 0 ? &logIntervalSel : logSetupField == 1 ? &logDurationSel : &logRadioSel;
-      const int count =
-          logSetupField == 0 ? LOG_INTERVAL_COUNT : logSetupField == 1 ? LOG_DURATION_COUNT : LOG_RADIO_COUNT;
+      const int count = logSetupField == 0   ? LOG_INTERVAL_COUNT
+                        : logSetupField == 1 ? LOG_DURATION_COUNT
+                                             : LOG_RADIO_COUNT;
       *sel = (*sel + dir + count) % count;
       requestUpdate();
     } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
@@ -1633,6 +1729,57 @@ void RadioAuditActivity::loop() {
       return;
     }
     if (millis() - logLastMs >= logIntervalMs) scanLogPass();
+    return;
+  }
+
+  // mDNS Browser: query one service type per tick (each blocks ~1 s, well under
+  // the watchdog limit). Back cancels and shows whatever responded so far.
+  if (state == State::MDNS_QUERY) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      finishMdnsQuery();
+      return;
+    }
+    runMdnsQueryPass();
+    return;
+  }
+
+  // LAN Scanner: ARP-sweep a batch of hosts per tick; Back stops early.
+  if (state == State::LAN_SCAN) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      finishLanScan();
+      return;
+    }
+    lanScanPass();
+    return;
+  }
+
+  // Port Probe: TCP-connect one port per tick; Back stops early (shows partial).
+  if (state == State::PORT_PROBE) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      finishPortProbe();
+      return;
+    }
+    portProbePass();
+    return;
+  }
+
+  // Traceroute: ping one TTL per tick; Back stops early (shows partial).
+  if (state == State::TRACEROUTE) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      finishTraceroute();
+      return;
+    }
+    traceroutePass();
+    return;
+  }
+
+  // SNMP Sweep: try one community string per tick; Back stops early (shows partial).
+  if (state == State::SNMP_SWEEP) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      finishSnmpSweep();
+      return;
+    }
+    snmpSweepPass();
     return;
   }
 
@@ -1695,7 +1842,8 @@ void RadioAuditActivity::loop() {
         esp_wifi_set_channel(captureChannel, WIFI_SECOND_CHAN_NONE);
         if (targetCamHasAp) {
           attackFrames += sendDeauthBurst(targetCamAp, targetCamMac, 8);  // directed: kick the client
-          attackStatusLine = std::string("client ") + macToString(targetCamMac) + " CH" + std::to_string(captureChannel);
+          attackStatusLine =
+              std::string("client ") + macToString(targetCamMac) + " CH" + std::to_string(captureChannel);
         } else {
           attackFrames += sendDeauthBurst(targetCamMac, BROADCAST_MAC, 8);  // AP cam: kick all clients
           attackStatusLine = std::string("AP ") + macToString(targetCamMac) + " CH" + std::to_string(captureChannel);
@@ -1731,6 +1879,30 @@ void RadioAuditActivity::loop() {
   }
 
   // Selectable list of camera-sweep hits: Confirm opens the detail (Locate/Deauth).
+  if (showingMdnsList) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      showingMdnsList = false;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      if (!mdnsResults.empty()) openMdnsDetail(mdnsSel);
+      return;
+    }
+    const int n = static_cast<int>(mdnsResults.size());
+    if (n > 0) {
+      buttonNavigator.onNext([this, n] {
+        mdnsSel = ButtonNavigator::nextIndex(mdnsSel, n);
+        requestUpdate();
+      });
+      buttonNavigator.onPrevious([this, n] {
+        mdnsSel = ButtonNavigator::previousIndex(mdnsSel, n);
+        requestUpdate();
+      });
+    }
+    return;
+  }
+
   if (showingCameraList) {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       showingCameraList = false;
@@ -1784,8 +1956,9 @@ void RadioAuditActivity::loop() {
     }
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       showingTarget = false;
+      showingMdnsList = targetFromMdnsList;      // back to the mDNS list if we came from it
       showingCameraList = targetFromCameraList;  // back to the camera list if we came from it
-      showingDetails = !targetFromCameraList && targetFromList;
+      showingDetails = !targetFromMdnsList && !targetFromCameraList && targetFromList;
       requestUpdate();
       return;
     }
@@ -1795,7 +1968,8 @@ void RadioAuditActivity::loop() {
         return;
       }
       showingTarget = false;
-      showingDetails = targetFromList;
+      showingMdnsList = targetFromMdnsList;  // mDNS detail has no actions: Confirm returns to the list
+      showingDetails = !targetFromMdnsList && targetFromList;
       requestUpdate();
       return;
     }
@@ -1814,9 +1988,9 @@ void RadioAuditActivity::loop() {
   }
 
   if (showingDetails || showingFindings) {
-    const int itemCount =
-        showingFindings ? static_cast<int>(auditFindings.size())
-                        : (showingBleDetails ? static_cast<int>(bleFindings.size()) : static_cast<int>(wifiFindings.size()));
+    const int itemCount = showingFindings ? static_cast<int>(auditFindings.size())
+                                          : (showingBleDetails ? static_cast<int>(bleFindings.size())
+                                                               : static_cast<int>(wifiFindings.size()));
     // Back closes the list. Select (Confirm) deep-scans the highlighted target.
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       showingDetails = false;
@@ -1851,8 +2025,10 @@ void RadioAuditActivity::loop() {
         return;
       }
       if (itemCount > 0) {
-        if (showingBleDetails) deepScanBleTarget(selectedFinding);
-        else deepScanWifiTarget(selectedFinding);
+        if (showingBleDetails)
+          deepScanBleTarget(selectedFinding);
+        else
+          deepScanWifiTarget(selectedFinding);
       }
       return;
     }
@@ -1915,15 +2091,33 @@ void RadioAuditActivity::loop() {
 
 void RadioAuditActivity::runAction(Action action) {
   switch (action) {
-    case Action::QuickScan: startScan(false, ScanScope::Both); return;
-    case Action::DeepScan: startScan(true, ScanScope::Both); return;
-    case Action::WifiScan: startScan(false, ScanScope::WifiOnly); return;
-    case Action::BleScan: startScan(false, ScanScope::BleOnly); return;
-    case Action::ClientRecon: startProbeScan(); return;
-    case Action::ChannelUsage: showChannelUsage(); return;
-    case Action::AuditFindings: showAuditFindings(); return;
-    case Action::WifiResults: showWifiDetails(); return;
-    case Action::BleResults: showBleDetails(); return;
+    case Action::QuickScan:
+      startScan(false, ScanScope::Both);
+      return;
+    case Action::DeepScan:
+      startScan(true, ScanScope::Both);
+      return;
+    case Action::WifiScan:
+      startScan(false, ScanScope::WifiOnly);
+      return;
+    case Action::BleScan:
+      startScan(false, ScanScope::BleOnly);
+      return;
+    case Action::ClientRecon:
+      startProbeScan();
+      return;
+    case Action::ChannelUsage:
+      showChannelUsage();
+      return;
+    case Action::AuditFindings:
+      showAuditFindings();
+      return;
+    case Action::WifiResults:
+      showWifiDetails();
+      return;
+    case Action::BleResults:
+      showBleDetails();
+      return;
     case Action::ReportViewer:
       // Browse + read saved reports/captures on-device (TXT opens in the reader).
       startActivityForResult(std::make_unique<FileBrowserActivity>(renderer, mappedInput, "/.radioink",
@@ -1937,21 +2131,87 @@ void RadioAuditActivity::runAction(Action action) {
           std::make_unique<WebReportActivity>(renderer, mappedInput, std::string(makeTextReport().c_str())),
           [this](const ActivityResult&) { requestUpdate(); });
       return;
-    case Action::CameraSweep: startCameraSweep(); return;
-    case Action::TrackerSweep: startTrackerSweep(); return;
-    case Action::ThreatSweep: startThreatSweep(); return;
-    case Action::AntiStalk: startAntiStalk(); return;
-    case Action::DroneScan: startDroneScan(); return;
-    case Action::Guardian: startGuardian(); return;
-    case Action::ScheduledLog: showLogSetup(); return;
-    case Action::DeauthDetector: startDeauthDetect(); return;
-    case Action::About: showAbout(); return;
-    case Action::ExportText: exportText(); return;
-    case Action::ExportCsv: exportCsv(); return;
-    case Action::ExportJson: exportJson(); return;
-    case Action::ExportWigle: exportWigle(); return;
-    case Action::CapturePcap: startPcapCapture(); return;
-    case Action::CaptureHandshake: startHandshakeCapture(); return;
+    case Action::CameraSweep:
+      startCameraSweep();
+      return;
+    case Action::TrackerSweep:
+      startTrackerSweep();
+      return;
+    case Action::ThreatSweep:
+      startThreatSweep();
+      return;
+    case Action::AntiStalk:
+      startAntiStalk();
+      return;
+    case Action::DroneScan:
+      startDroneScan();
+      return;
+    case Action::Guardian:
+      startGuardian();
+      return;
+    case Action::ScheduledLog:
+      showLogSetup();
+      return;
+    case Action::MdnsBrowse:
+      startMdnsBrowse();
+      return;
+    case Action::LanScan:
+      startLanScan();
+      return;
+    case Action::NtpSync:
+      startNtpSync();
+      return;
+    case Action::NetInfo:
+      startNetInfo();
+      return;
+    case Action::PortProbe:
+      startPortProbe();
+      return;
+    case Action::SubnetCalc:
+      showSubnetCalc();
+      return;
+    case Action::Traceroute:
+      startTraceroute();
+      return;
+    case Action::DhcpProbe:
+      startDhcpProbe();
+      return;
+    case Action::SnmpSweep:
+      startSnmpSweep();
+      return;
+    case Action::WpsAudit:
+      showWpsAudit();
+      return;
+    case Action::SystemStats:
+      showSystemStats();
+      return;
+    case Action::I2cScan:
+      showI2cScan();
+      return;
+    case Action::DeauthDetector:
+      startDeauthDetect();
+      return;
+    case Action::About:
+      showAbout();
+      return;
+    case Action::ExportText:
+      exportText();
+      return;
+    case Action::ExportCsv:
+      exportCsv();
+      return;
+    case Action::ExportJson:
+      exportJson();
+      return;
+    case Action::ExportWigle:
+      exportWigle();
+      return;
+    case Action::CapturePcap:
+      startPcapCapture();
+      return;
+    case Action::CaptureHandshake:
+      startHandshakeCapture();
+      return;
     case Action::DeauthAttack:
     case Action::DeauthSelected:
     case Action::BeaconFlood:
@@ -1960,16 +2220,24 @@ void RadioAuditActivity::runAction(Action action) {
     case Action::Karma:
     case Action::DeauthCameras:
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
-      if (action == Action::DeauthAttack) startDeauthAttack();
-      else if (action == Action::DeauthSelected) startDeauthSelected();
-      else if (action == Action::BeaconFlood) startBeaconFlood();
-      else if (action == Action::EvilTwin) startEvilTwin();
-      else if (action == Action::BleSpoof) startBleSpoof();
-      else if (action == Action::Karma) startKarma();
-      else startDeauthCameras();
+      if (action == Action::DeauthAttack)
+        startDeauthAttack();
+      else if (action == Action::DeauthSelected)
+        startDeauthSelected();
+      else if (action == Action::BeaconFlood)
+        startBeaconFlood();
+      else if (action == Action::EvilTwin)
+        startEvilTwin();
+      else if (action == Action::BleSpoof)
+        startBleSpoof();
+      else if (action == Action::Karma)
+        startKarma();
+      else
+        startDeauthCameras();
 #endif
       return;
-    case Action::COUNT: return;  // sentinel, never dispatched
+    case Action::COUNT:
+      return;  // sentinel, never dispatched
   }
 }
 
@@ -1997,8 +2265,8 @@ void RadioAuditActivity::beginScanPass() {
 
 void RadioAuditActivity::startWifiScanPass() {
   state = State::WIFI_SCANNING;
-  status = (String(deepScanMode ? "Deep WiFi pass " : "Scanning WiFi ") + scanCurrentPass + "/" + scanTotalPasses)
-               .c_str();
+  status =
+      (String(deepScanMode ? "Deep WiFi pass " : "Scanning WiFi ") + scanCurrentPass + "/" + scanTotalPasses).c_str();
   requestUpdate();
 
   resetWifiForScan();
@@ -2057,10 +2325,15 @@ void RadioAuditActivity::prepWifiSta() {
 void RadioAuditActivity::startBleScan() {
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   state = State::BLE_SCANNING;
-  status = (String(deepScanMode ? "Deep BLE pass " : "Scanning BLE ") + scanCurrentPass + "/" + scanTotalPasses)
-               .c_str();
+  status =
+      (String(deepScanMode ? "Deep BLE pass " : "Scanning BLE ") + scanCurrentPass + "/" + scanTotalPasses).c_str();
   requestUpdateAndWait();
-  if (!runBleScan(/*active=*/false, /*windows=*/1)) status = "BLE skipped (low memory)";
+  // Streaming (erase-as-you-go), not the accumulating runBleScan: a dense BLE
+  // environment (100+ devices -- apartment building, office, conference) can
+  // grow NimBLE's internal result map faster than a single 2s window drains
+  // it, exhausting heap (bad_alloc -> abort() with -fno-exceptions). Passive
+  // mode here (no scan-response wait) makes every advert immediately erasable.
+  if (!runBleScanStreaming(/*windows=*/1)) status = "BLE skipped (low memory)";
 #endif
   finishScanPass();
 }
@@ -2069,69 +2342,12 @@ void RadioAuditActivity::startBleScan() {
 // Turn WiFi off, bring up the BLE controller (heap-floor guarded), and run
 // `windows` bounded scan passes into bleFindings (clearing between to cap peak
 // memory). Returns false if skipped for low heap. Shared by every BLE scan.
-bool RadioAuditActivity::runBleScan(bool active, int windows) {
-  WiFi.scanDelete();
-  WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_OFF);
-  delay(200);
-
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("RADIO", "BLE pre-scan heap %u", static_cast<unsigned>(freeHeap));
-  if (freeHeap < BLE_HEAP_FLOOR_START) {
-    LOG_ERR("RADIO", "BLE skipped: heap %u < %u", static_cast<unsigned>(freeHeap), BLE_HEAP_FLOOR_START);
-    return false;
-  }
-  if (!bleReady) {
-    BLEDevice::init("RadioInk");
-    bleScan = BLEDevice::getScan();
-    bleReady = true;
-  }
-  bleScan->setActiveScan(active);
-  bleScan->setInterval(320);
-  bleScan->setWindow(80);
-  for (int w = 0; w < windows; w++) {
-    if (ESP.getFreeHeap() < BLE_HEAP_FLOOR_ABORT) {
-      LOG_ERR("RADIO", "BLE aborted at window %d: low heap", w);
-      break;
-    }
-    absorbBleResults(bleScan->start(2, false), 96);
-    bleScan->clearResults();
-  }
-  shutdownBleController();
-  return true;
-}
-
-// Merge up to maxDevices from one scan window. The cap guards against a corrupt
-// or pathologically large result set; our own storage is bounded separately.
-void RadioAuditActivity::absorbBleResults(BLEScanResults* results, int maxDevices) {
-  const int count = results ? results->getCount() : 0;
-  for (int i = 0; i < count && i < maxDevices; i++) {
-    BLEAdvertisedDevice device = results->getDevice(i);
-    BleFinding finding;
-    finding.address = device.getAddress().toString().c_str();
-    finding.name = device.haveName() ? device.getName().c_str() : "";
-    finding.rssi = device.getRSSI();
-    finding.rssiMin = finding.rssi;
-    finding.rssiMax = finding.rssi;
-    finding.rssiSum = finding.rssi;
-    finding.seenCount = 1;
-    finding.hasTxPower = device.haveTXPower();
-    finding.txPower = finding.hasTxPower ? device.getTXPower() : 0;
-    finding.manufacturerHex = device.haveManufacturerData() ? hexEncode(device.getManufacturerData()).c_str() : "";
-    if (device.haveServiceUUID()) finding.serviceUuid = device.getServiceUUID().toString().c_str();
-    if (device.haveServiceData()) {
-      finding.serviceDataUuid = device.getServiceDataUUID().toString().c_str();
-      finding.serviceDataHex = hexEncode(device.getServiceData()).c_str();
-    }
-    mergeBleFinding(std::move(finding));
-  }
-}
-
 void RadioAuditActivity::ingestStreamedAdvert(BLEAdvertisedDevice& device) {
   // Same per-device merge as absorbBleResults, but driven one advert at a time
   // from the streaming callback (the device is erased right after this returns).
   BleFinding finding;
   finding.address = device.getAddress().toString().c_str();
+  finding.addrType = device.getAddressType();  // needed to connect (AirTags use random addrs)
   finding.name = device.haveName() ? device.getName().c_str() : "";
   finding.rssi = device.getRSSI();
   finding.rssiMin = finding.rssi;
@@ -2166,7 +2382,7 @@ class StreamingScanCb : public BLEAdvertisedDeviceCallbacks {
 StreamingScanCb g_streamCb;
 }  // namespace
 
-bool RadioAuditActivity::runBleScanStreaming(int windows) {
+bool RadioAuditActivity::runBleScanStreaming(int windows, bool active) {
   WiFi.scanDelete();
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
@@ -2187,12 +2403,20 @@ bool RadioAuditActivity::runBleScanStreaming(int windows) {
     shutdownBleController();
     return false;
   }
+  // Real operating point once the controller is up (init eats ~65 KB): this is the
+  // budget the advert callback churns against. Logged (ERR level so it lands in the
+  // SD log by default) to size any future fragmentation guard against real numbers.
+  LOG_ERR("RADIO", "BLE post-init free=%u maxblock=%u", static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()));
   g_streamCb.owner = this;
   g_streamCb.scan = bleScan;
-  // Passive: the GAP handler reports each advert immediately (no scan-response
-  // wait), so the callback's erase keeps the result map from accumulating.
+  // The callback erases each advert as it arrives, so the Bluedroid result map
+  // never accumulates -- memory stays bounded regardless of how many devices are
+  // present (this is what prevents an OOM abort in a dense BLE environment) and
+  // regardless of active vs passive. Active adds scan-request TX to pull in device
+  // names/scan-responses (used by the camera/tracker sweeps for name matching).
   bleScan->setAdvertisedDeviceCallbacks(&g_streamCb, /*wantDuplicates=*/false, /*shouldParse=*/true);
-  bleScan->setActiveScan(false);
+  bleScan->setActiveScan(active);
   bleScan->setInterval(320);
   bleScan->setWindow(80);
   for (int w = 0; w < windows; w++) {
@@ -2246,8 +2470,8 @@ void RadioAuditActivity::finishScanPass() {
   rebuildAuditFindings();
   scanTime = timeStamp();
   state = State::DONE;
-  status = (String(deepScanMode ? "Deep scan complete, " : "Scan complete, ") + auditFindings.size() + " findings")
-               .c_str();
+  status =
+      (String(deepScanMode ? "Deep scan complete, " : "Scan complete, ") + auditFindings.size() + " findings").c_str();
   requestUpdate();
 }
 
@@ -2259,6 +2483,10 @@ void RadioAuditActivity::mergeWifiFinding(WifiFinding&& finding) {
       existing.rssiMax = std::max(existing.rssiMax, finding.rssi);
       existing.rssiSum += finding.rssi;
       existing.seenCount++;
+      // A KARMA/mana AP dynamically clones whatever SSID it's probed for, so the
+      // same BSSID reporting a different SSID pass-to-pass is a strong signal --
+      // flag it before the new text overwrites the one we alerted on.
+      if (!existing.ssid.empty() && !finding.ssid.empty() && existing.ssid != finding.ssid) existing.ssidChanged = true;
       if (existing.ssid.empty() && !finding.ssid.empty()) existing.ssid = finding.ssid;
       existing.auth = finding.auth;
       existing.channel = finding.channel;
@@ -2343,8 +2571,7 @@ void RadioAuditActivity::exportJson() {
 
 void RadioAuditActivity::exportWigle() {
   const String report = makeWigleReport();
-  const bool ok =
-      saveFile(WIGLE_EXPORT_PATH, report) && saveFile(makeTimestampedPath("wigle.csv").c_str(), report);
+  const bool ok = saveFile(WIGLE_EXPORT_PATH, report) && saveFile(makeTimestampedPath("wigle.csv").c_str(), report);
   state = State::SAVED;
   status = ok ? "Saved WiGLE CSV" : "Save failed";
   requestUpdate();
@@ -2405,9 +2632,8 @@ void RadioAuditActivity::rebuildAuditFindings() {
   loadWatchlist();
 
   auto addFinding = [this](const char* severity, const std::string& title, const std::string& detail,
-                           int wifiIndex = -1, int bleIndex = -1) {
-    addAuditFinding(severity, title, detail, wifiIndex, bleIndex);
-  };
+                           int wifiIndex = -1,
+                           int bleIndex = -1) { addAuditFinding(severity, title, detail, wifiIndex, bleIndex); };
   auto onWatchlist = [this](const std::string& mac) { return isWatchlisted(mac); };
 
   int channelCounts[15] = {};
@@ -2428,6 +2654,17 @@ void RadioAuditActivity::rebuildAuditFindings() {
       addFinding("HIGH", "WEP WiFi network", base + " uses broken legacy encryption.", wi);
     } else if (w.auth == "WPA") {
       addFinding("MED", "Legacy WPA network", base + " is not WPA2/WPA3.", wi);
+    } else if (w.auth.find("EAP") != std::string::npos) {
+      addFinding("INFO", "Enterprise (802.1X) network",
+                 base + " authenticates via " + w.auth + " - identify the EAP method separately if scoping.", wi);
+    }
+
+    if (w.ssidChanged) {
+      addFinding("HIGH", "Unstable AP identity (possible KARMA)",
+                 base +
+                     " advertised a different SSID across scan passes - a hallmark of KARMA/mana-style"
+                     " probe-response cloning.",
+                 wi);
     }
 
     if (w.hidden) {
@@ -2445,10 +2682,10 @@ void RadioAuditActivity::rebuildAuditFindings() {
     if (cameraReason.empty()) cameraReason = cameraMacReason(w.bssid);
     if (!cameraReason.empty()) {
       const bool flock = cameraReason.find("Flock") != std::string::npos;
-      addFinding(flock ? "HIGH" : "MED", flock ? "Flock Safety camera" : "Possible security camera",
-                 base + " matches camera sweep: " + cameraReason +
-                     (wifiVendor.empty() ? "." : (" (" + wifiVendor + ").")),
-                 wi);
+      addFinding(
+          flock ? "HIGH" : "MED", flock ? "Flock Safety camera" : "Possible security camera",
+          base + " matches camera sweep: " + cameraReason + (wifiVendor.empty() ? "." : (" (" + wifiVendor + ").")),
+          wi);
     }
 
     const std::string pwn = pwnagotchiReason(w.ssid, w.bssid);
@@ -2497,11 +2734,60 @@ void RadioAuditActivity::rebuildAuditFindings() {
     }
   }
 
+  // Evil-twin typosquat: SSIDs that closely resemble another (but aren't
+  // identical -- that's the exact-duplicate case above) are a classic
+  // phishing-AP signature ("Starbucks_WiFi" vs "Starbucks_WlFi").
+  {
+    std::vector<size_t> uniqueIdx;
+    uniqueIdx.reserve(wifiFindings.size());
+    for (size_t i = 0; i < wifiFindings.size(); i++) {
+      if (wifiFindings[i].ssid.empty()) continue;
+      bool dup = false;
+      for (size_t u : uniqueIdx) {
+        if (wifiFindings[u].ssid == wifiFindings[i].ssid) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) uniqueIdx.push_back(i);
+    }
+    for (size_t a = 0; a < uniqueIdx.size(); a++) {
+      const auto& ssidA = wifiFindings[uniqueIdx[a]].ssid;
+      if (ssidA.size() < 4) continue;  // too short to judge similarity meaningfully
+      for (size_t b = a + 1; b < uniqueIdx.size(); b++) {
+        const auto& ssidB = wifiFindings[uniqueIdx[b]].ssid;
+        if (ssidB.size() < 4) continue;
+        if (ssidA.size() > ssidB.size() + 2 || ssidB.size() > ssidA.size() + 2) continue;  // cheap pre-filter
+        const int dist = levenshteinDistance(ssidA, ssidB);
+        if (dist > 0 && dist <= 2) {
+          addFinding("MED", "Possible SSID look-alike",
+                     ssidA + " (" + wifiFindings[uniqueIdx[a]].bssid + ") closely resembles " + ssidB + " (" +
+                         wifiFindings[uniqueIdx[b]].bssid + ") - possible phishing AP.",
+                     static_cast<int>(uniqueIdx[a]));
+        }
+      }
+    }
+  }
+
   for (int channel = 1; channel <= 14; channel++) {
     if (channelCounts[channel] >= 4) {
-      addFinding("INFO", "Crowded WiFi channel",
-                 "Channel " + std::to_string(channel) + " has " + std::to_string(channelCounts[channel]) +
-                     " visible APs.");
+      addFinding(
+          "INFO", "Crowded WiFi channel",
+          "Channel " + std::to_string(channel) + " has " + std::to_string(channelCounts[channel]) + " visible APs.");
+    }
+  }
+
+  // Co-channel/adjacent-channel congestion: 2.4GHz channels within +/-4 overlap
+  // significantly, so a flat per-channel count (above) understates real
+  // interference when APs are spread across several adjacent channels. Score the
+  // 3 standard non-overlapping planning channels (1/6/11) by everything nearby.
+  for (int primary : {1, 6, 11}) {
+    int nearby = 0;
+    for (int ch = std::max(1, primary - 4); ch <= std::min(14, primary + 4); ch++) nearby += channelCounts[ch];
+    if (nearby >= 6) {
+      addFinding("INFO", "Congested channel neighborhood",
+                 "Channel " + std::to_string(primary) + " and its overlapping neighbors have " +
+                     std::to_string(nearby) + " APs combined - expect interference.");
     }
   }
 
@@ -2510,11 +2796,9 @@ void RadioAuditActivity::rebuildAuditFindings() {
     const std::string label = b.name.empty() ? b.address : b.name + " " + b.address;
     const std::string advType = decodeBleAdvert(b.manufacturerHex, b.serviceDataUuid, b.serviceDataHex);
     const std::string cameraReason = cameraFingerprintReason(label + " " + advType, bleCompany(b.manufacturerHex));
-    if (onWatchlist(b.address))
-      addFinding("HIGH", "Watchlist hit", label + " is on your watchlist.", -1, bi);
+    if (onWatchlist(b.address)) addFinding("HIGH", "Watchlist hit", label + " is on your watchlist.", -1, bi);
     if (!cameraReason.empty()) {
-      addFinding("MED", "Possible security camera",
-                 label + " matches camera sweep: " + cameraReason + ".", -1, bi);
+      addFinding("MED", "Possible security camera", label + " matches camera sweep: " + cameraReason + ".", -1, bi);
     }
     const std::string bleThreat =
         bleThreatReason(b.name, b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex);
@@ -2536,8 +2820,8 @@ void RadioAuditActivity::rebuildAuditFindings() {
     }
     if (b.rssi >= -55) {
       addFinding("MED", "Close BLE device",
-                 label + " is nearby at avg " + std::to_string(b.rssi) + " dBm, seen " +
-                     std::to_string(b.seenCount) + "/" + std::to_string(scanTotalPasses) + ".",
+                 label + " is nearby at avg " + std::to_string(b.rssi) + " dBm, seen " + std::to_string(b.seenCount) +
+                     "/" + std::to_string(scanTotalPasses) + ".",
                  -1, bi);
     }
     if (advType.find("FindMy") != std::string::npos || advType.find("AirTag") != std::string::npos) {
@@ -2712,7 +2996,9 @@ void RadioAuditActivity::startCameraSweep() {
   state = State::BLE_SCANNING;
   status = "Camera sweep: BLE...";
   requestUpdateAndWait();
-  runBleScan(/*active=*/true, /*windows=*/3);
+  // Bounded (erase-as-you-go) active scan. The old accumulating runBleScan retained
+  // every advert for the whole window and OOM-aborted in a dense BLE environment.
+  runBleScanStreaming(/*windows=*/3, /*active=*/true);
 #endif
 
   std::sort(wifiFindings.begin(), wifiFindings.end(),
@@ -2786,6 +3072,7 @@ void RadioAuditActivity::buildCameraTargets() {
     CameraTarget t;
     t.kind = CameraTarget::Kind::Ble;
     t.mac = b.address;
+    t.addrType = b.addrType;
     t.label = label;
     t.reason = reason;
     t.rssi = b.rssi;
@@ -2803,6 +3090,7 @@ void RadioAuditActivity::buildCameraTargets() {
 
 void RadioAuditActivity::showCameraSweep() {
   buildCameraTargets();
+  cameraListTitle = "Cameras";
 
   if (!cameraTargets.empty()) {
     status = std::to_string(cameraTargets.size()) + " camera(s) - select to act";
@@ -2843,16 +3131,15 @@ void RadioAuditActivity::renderCameraList() {
   const auto pageHeight = renderer.getScreenHeight();
   renderer.clearScreen();
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "Cameras", status.c_str());
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, cameraListTitle.c_str(),
+                 status.c_str());
   const int n = static_cast<int>(cameraTargets.size());
   const int listHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, listHeight}, n, cameraSel,
       [this](int i) {
         const CameraTarget& t = cameraTargets[i];
-        const char* k = t.kind == CameraTarget::Kind::WifiAp ? "AP"
-                        : t.kind == CameraTarget::Kind::Ble  ? "BLE"
-                                                             : "STA";
+        const char* k = t.kind == CameraTarget::Kind::WifiAp ? "AP" : t.kind == CameraTarget::Kind::Ble ? "BLE" : "STA";
         return std::string("[") + k + "] " + t.label + "  " + std::to_string(t.rssi) + "dBm";
       },
       nullptr, nullptr);
@@ -2866,7 +3153,8 @@ void RadioAuditActivity::openCameraDetail(int idx) {
   if (idx < 0 || idx >= static_cast<int>(cameraTargets.size())) return;
   const CameraTarget& t = cameraTargets[idx];
 
-  targetTitle = "Camera";
+  targetIsFindMy = t.findMy;
+  targetTitle = t.findMy ? "Tracker" : "Camera";
   targetLines.clear();
   targetScroll = 0;
   const char* kindStr = t.kind == CameraTarget::Kind::WifiAp ? "WiFi AP"
@@ -2894,6 +3182,7 @@ void RadioAuditActivity::openCameraDetail(int idx) {
   if (t.kind == CameraTarget::Kind::Ble) {
     targetLocBle = true;
     targetLocAddr = t.mac;
+    targetLocAddrType = t.addrType;
   } else {
     targetLocBle = false;
     memcpy(targetLocBssid, t.macBytes, 6);  // locate by this device's MAC (matches any addr field)
@@ -2941,7 +3230,9 @@ void RadioAuditActivity::startTrackerSweep() {
   requestUpdateAndWait();
 
 #if defined(RADIO_AUDIT_ENABLE_BLE)
-  runBleScan(/*active=*/true, /*windows=*/3);
+  // Bounded (erase-as-you-go) active scan. The old accumulating runBleScan retained
+  // every advert for the whole window and OOM-aborted in a dense BLE environment.
+  runBleScanStreaming(/*windows=*/3, /*active=*/true);
 #endif
 
   std::sort(bleFindings.begin(), bleFindings.end(),
@@ -2949,28 +3240,49 @@ void RadioAuditActivity::startTrackerSweep() {
   scanTime = timeStamp();
   state = State::DONE;
 
+  // Build a selectable list of tracker hits (reusing the camera-hit list machinery).
+  // Selecting one opens the detail view with Locate, plus Play Sound for Find My tags.
+  cameraTargets.clear();
+  cameraSel = 0;
+  for (const auto& b : bleFindings) {
+    const std::string reason = trackerReason(b.manufacturerHex, b.serviceDataUuid, b.serviceDataHex, b.name);
+    if (reason.empty()) continue;
+    CameraTarget t;
+    t.kind = CameraTarget::Kind::Ble;
+    t.mac = b.address;
+    t.addrType = b.addrType;
+    t.label = b.name.empty() ? reason : b.name;
+    t.reason = reason;
+    t.rssi = b.rssi;
+    t.findMy = reason.rfind("Apple", 0) == 0;  // Apple Find My / AirTag → play-sound eligible
+    cameraTargets.push_back(std::move(t));
+  }
+  const int hits = static_cast<int>(cameraTargets.size());
+
+  if (hits > 0) {
+    cameraListTitle = "Trackers";
+    status = std::to_string(hits) + " tracker(s) - select to act";
+    showingCameraList = true;
+    showingTarget = false;
+    showingDetails = false;
+    showingFindings = false;
+    requestUpdate();
+    return;
+  }
+
+  // No hits: informative text view.
   targetTitle = "Tracker Sweep";
   targetLines.clear();
   targetScroll = 0;
   targetFromList = false;
   targetLocatable = false;
-  int hits = 0;
   targetLines.push_back("BLE devices " + std::to_string(bleFindings.size()));
-  for (const auto& b : bleFindings) {
-    const std::string reason = trackerReason(b.manufacturerHex, b.serviceDataUuid, b.serviceDataHex, b.name);
-    if (reason.empty()) continue;
-    hits++;
-    targetLines.push_back(reason);
-    targetLines.push_back("  " + (b.name.empty() ? b.address : b.name) + "  " + std::to_string(b.rssi) + " dBm");
-    if (!b.name.empty()) targetLines.push_back("  " + b.address);
-  }
-  if (hits == 0) {
-    targetLines.push_back("No known trackers detected.");
-    targetLines.push_back("Note: AirTags rotate their MAC and");
-    targetLines.push_back("only beacon FindMy when separated");
-    targetLines.push_back("from their owner.");
-  }
-  status = std::string("Trackers: ") + std::to_string(hits);
+  targetLines.push_back("No known trackers detected.");
+  targetLines.push_back("Note: AirTags rotate their MAC and");
+  targetLines.push_back("only beacon FindMy when separated");
+  targetLines.push_back("from their owner.");
+  status = "Trackers: 0";
+  showingCameraList = false;
   showingTarget = true;
   showingDetails = false;
   showingFindings = false;
@@ -3194,8 +3506,8 @@ void RadioAuditActivity::antiStalkPass() {
     slot->passesMissed = 0;
     slot->rssi = b.rssi;
     slot->label = b.name.empty() ? bleVendorName(b.manufacturerHex) : b.name;
-    const std::string tr = trackerReason(b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid,
-                                         b.serviceDataHex, b.name);
+    const std::string tr =
+        trackerReason(b.manufacturerHex, b.serviceUuid + " " + b.serviceDataUuid, b.serviceDataHex, b.name);
     slot->tracker = !tr.empty();
     if (slot->tracker) slot->kind = tr;
     slot->watchlisted = isWatchlisted(b.address);
@@ -3280,11 +3592,11 @@ void RadioAuditActivity::renderAntiStalk() {
     if (e->passesSeen >= STALK_THRESHOLD) followers++;
 
   int y = contentTop;
-  renderer.drawText(UI_12_FONT_ID, x, y,
-                    (String("Pass ") + stalkPassCount + "   Tracked: " + (int)stalkTable.size() +
-                     "   Followers: " + followers)
-                        .c_str(),
-                    true, EpdFontFamily::BOLD);
+  renderer.drawText(
+      UI_12_FONT_ID, x, y,
+      (String("Pass ") + stalkPassCount + "   Tracked: " + (int)stalkTable.size() + "   Followers: " + followers)
+          .c_str(),
+      true, EpdFontFamily::BOLD);
   y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
 
   const int lineH = renderer.getLineHeight(SMALL_FONT_ID) + 4;
@@ -3294,8 +3606,8 @@ void RadioAuditActivity::renderAntiStalk() {
   for (const auto* e : sorted) {
     if (rows >= maxRows) break;
     const char* tag = e->watchlisted ? "[W] " : (e->tracker ? "[T] " : (e->passesSeen >= STALK_THRESHOLD ? "* " : ""));
-    const String line = String(tag) + (e->label.empty() ? e->addr.c_str() : e->label.c_str()) + "  " +
-                        e->passesSeen + "/" + stalkPassCount + "  " + e->rssi + "dBm";
+    const String line = String(tag) + (e->label.empty() ? e->addr.c_str() : e->label.c_str()) + "  " + e->passesSeen +
+                        "/" + stalkPassCount + "  " + e->rssi + "dBm";
     renderer.drawText(SMALL_FONT_ID, x, y,
                       renderer.truncatedText(SMALL_FONT_ID, line.c_str(), pageWidth - x * 2).c_str());
     y += lineH;
@@ -3415,7 +3727,7 @@ void RadioAuditActivity::guardianPass() {
     const uint32_t start = millis();
     uint32_t lastHop = start;
     while (millis() - start < GUARDIAN_DEAUTH_WINDOW_MS) {
-      delay(40);  // yields so the promiscuous callback can fill g_dd
+      delay(40);             // yields so the promiscuous callback can fill g_dd
       mappedInput.update();  // poll Stop so the user isn't stuck waiting out the window
       if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
           mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
@@ -3455,8 +3767,7 @@ void RadioAuditActivity::guardianPass() {
       sev = 2;
   if (sev > guardianAlertPeak) guardianAlertPeak = sev;
 
-  status = guardianThreats.empty() ? "All clear"
-                                   : (std::to_string(guardianThreats.size()) + " active threat(s)");
+  status = guardianThreats.empty() ? "All clear" : (std::to_string(guardianThreats.size()) + " active threat(s)");
   guardianLastMs = millis();
   requestUpdate();
 }
@@ -3478,7 +3789,7 @@ void RadioAuditActivity::stopGuardian() {
   targetFromList = false;
   targetLocatable = false;
   targetLines.push_back(std::to_string(guardianRound) + " rounds monitored");
-  targetLines.push_back(guardianAlertPeak >= 2  ? "Peak: THREAT detected"
+  targetLines.push_back(guardianAlertPeak >= 2   ? "Peak: THREAT detected"
                         : guardianAlertPeak == 1 ? "Peak: caution"
                                                  : "Peak: all clear");
   if (!guardianThreats.empty()) {
@@ -3636,8 +3947,8 @@ void RadioAuditActivity::scanLogPass() {
     runBleScanStreaming(/*windows=*/1);
 #endif
     for (const auto& b : bleFindings) {
-      snprintf(line, sizeof(line), "%s,BLE,%s,%s,%d,,%s\n", ts.c_str(), b.address.c_str(),
-               csvEscape(b.name).c_str(), b.rssi, csvEscape(bleVendorName(b.manufacturerHex)).c_str());
+      snprintf(line, sizeof(line), "%s,BLE,%s,%s,%d,,%s\n", ts.c_str(), b.address.c_str(), csvEscape(b.name).c_str(),
+               b.rssi, csvEscape(bleVendorName(b.manufacturerHex)).c_str());
       captureFile.write(reinterpret_cast<const uint8_t*>(line), strlen(line));
       logEntries++;
     }
@@ -3701,6 +4012,1417 @@ void RadioAuditActivity::renderScheduledLog() {
   renderer.displayBuffer();
 }
 
+void RadioAuditActivity::startMdnsBrowse() {
+  // mDNS needs an IP on the LAN, so we must be associated to an AP. If a prior
+  // tool already left us connected, skip straight to the query; otherwise hand
+  // off to WifiSelectionActivity to pick + join a network, then resume here.
+  if (WiFi.status() == WL_CONNECTED) {
+    mdnsActive = false;  // first MDNS_QUERY tick does MDNS.begin() + clears the view
+    status = "Querying mDNS...";
+    state = State::MDNS_QUERY;
+    requestUpdate();
+    return;
+  }
+  shutdownBleController();  // free the BLE controller's heap + radio before STA
+  WiFi.mode(WIFI_STA);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+                             status = "Not connected";
+                             state = State::DONE;
+                             requestUpdate();
+                             return;
+                           }
+                           mdnsActive = false;
+                           status = "Querying mDNS...";
+                           state = State::MDNS_QUERY;
+                           requestUpdate();
+                         });
+}
+
+void RadioAuditActivity::runMdnsQueryPass() {
+  // First tick after entering the state: start the responder and reset the view.
+  // Returns immediately so the "Querying..." header paints before the first
+  // blocking query (each query below stalls ~3 s).
+  if (!mdnsActive) {
+    if (!MDNS.begin("radioink")) {
+      status = "mDNS init failed";
+      WiFi.disconnect(false, false);
+      WiFi.mode(WIFI_OFF);
+      state = State::DONE;
+      requestUpdate();
+      return;
+    }
+    mdnsActive = true;
+    mdnsServiceIdx = 0;
+    mdnsFoundCount = 0;
+    mdnsResults.clear();
+    mdnsResults.reserve(MDNS_MAX_RESULTS);
+    mdnsSel = 0;
+    return;
+  }
+
+  if (mdnsServiceIdx >= MDNS_SERVICE_COUNT || mdnsResults.size() >= MDNS_MAX_RESULTS) {
+    finishMdnsQuery();
+    return;
+  }
+
+  const MdnsService& s = MDNS_SERVICES[mdnsServiceIdx];
+  status = (String("Querying ") + s.label + " (" + (mdnsServiceIdx + 1) + "/" + MDNS_SERVICE_COUNT + ")").c_str();
+  requestUpdateAndWait();  // show which service before the ~3 s blocking query
+
+  const int n = MDNS.queryService(s.svc, s.proto);
+  for (int i = 0; i < n && mdnsResults.size() < MDNS_MAX_RESULTS; i++) {
+    MdnsResult r;
+    r.label = s.label;
+    r.instance = MDNS.instanceName(i).c_str();
+    r.host = MDNS.hostname(i).c_str();
+    r.ip = MDNS.address(i).toString().c_str();
+    r.port = MDNS.port(i);
+    // TXT metadata is part of this query's response; capture it now (the result
+    // set is replaced on the next queryService call). Capped to bound RAM.
+    const int txtCount = MDNS.numTxt(i);
+    r.txt.reserve(txtCount < MDNS_MAX_TXT ? txtCount : MDNS_MAX_TXT);
+    for (int t = 0; t < txtCount && t < MDNS_MAX_TXT; t++) {
+      r.txt.push_back((MDNS.txtKey(i, t) + "=" + MDNS.txt(i, t)).c_str());
+    }
+    mdnsResults.push_back(std::move(r));
+    mdnsFoundCount++;
+  }
+  mdnsServiceIdx++;
+  requestUpdate();
+}
+
+void RadioAuditActivity::finishMdnsQuery() {
+  MDNS.end();
+  mdnsActive = false;
+  // Return the radio to a clean idle state. Subsequent RF scans re-init WiFi via
+  // resetWifiForScan(); BLE re-inits on demand.
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  status = (String("mDNS: ") + mdnsFoundCount + " service(s)").c_str();
+  state = State::DONE;
+
+  if (mdnsResults.empty()) {
+    // Nothing responded: fall back to the plain message view.
+    targetTitle = "mDNS Services";
+    targetLines.clear();
+    targetLines.push_back("No services responded.");
+    targetScroll = 0;
+    targetFromList = false;
+    targetFromMdnsList = false;
+    targetLocatable = false;
+    showingTarget = true;
+    showingDetails = false;
+    showingFindings = false;
+    requestUpdate();
+    return;
+  }
+
+  // Hand off to the selectable list; Confirm drills into per-device detail.
+  mdnsSel = 0;
+  showingMdnsList = true;
+  showingTarget = false;
+  showingDetails = false;
+  showingFindings = false;
+  requestUpdate();
+}
+
+void RadioAuditActivity::renderMdnsList() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+  renderer.clearScreen();
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "mDNS Services",
+                 status.c_str());
+  const int n = static_cast<int>(mdnsResults.size());
+  const int listHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  GUI.drawList(
+      renderer, Rect{0, contentTop, pageWidth, listHeight}, n, mdnsSel,
+      [this](int i) {
+        const MdnsResult& r = mdnsResults[i];
+        const std::string& name = !r.instance.empty() ? r.instance : (!r.host.empty() ? r.host : r.ip);
+        return std::string("[") + r.label + "] " + name;
+      },
+      [this](int i) { return mdnsResults[i].ip + ":" + std::to_string(mdnsResults[i].port); }, nullptr,
+      [this](int i) { return std::to_string(i + 1) + "/" + std::to_string(mdnsResults.size()); });
+  const auto labels = mappedInput.mapLabels("Back", "Select", "Up", "Down");
+  UITheme::getInstance().suppressBrandLogoOnce();
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}
+
+void RadioAuditActivity::openMdnsDetail(int idx) {
+  if (idx < 0 || idx >= static_cast<int>(mdnsResults.size())) return;
+  const MdnsResult& r = mdnsResults[idx];
+
+  targetTitle = !r.instance.empty() ? r.instance : (!r.host.empty() ? r.host : r.ip);
+  targetLines.clear();
+  targetLines.reserve(5 + r.txt.size());
+  targetScroll = 0;
+  targetLines.push_back(std::string("Type: ") + r.label);
+  if (!r.host.empty()) targetLines.push_back("Host: " + r.host);
+  targetLines.push_back("Addr: " + r.ip + ":" + std::to_string(r.port));
+  if (r.txt.empty()) {
+    targetLines.push_back("(no TXT records)");
+  } else {
+    targetLines.push_back(std::string("TXT (") + std::to_string(r.txt.size()) + "):");
+    for (const auto& kv : r.txt) targetLines.push_back("  " + kv);
+  }
+
+  targetLocatable = false;  // passive detail only -- no action menu
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = true;
+  targetMenuOpen = false;
+  showingTarget = true;
+  showingMdnsList = false;
+  showingCameraList = false;
+  showingDetails = false;
+  requestUpdate();
+}
+
+// --- LAN Scanner (Network) ---
+
+void RadioAuditActivity::startLanScan() {
+  // Needs an IP on the target LAN. Reuse an existing association, else hand off
+  // to WifiSelectionActivity (same flow as the mDNS browser).
+  if (WiFi.status() == WL_CONNECTED) {
+    lanNext = 0;  // first LAN_SCAN tick derives the subnet + resets state
+    status = "LAN scan...";
+    state = State::LAN_SCAN;
+    requestUpdate();
+    return;
+  }
+  shutdownBleController();
+  WiFi.mode(WIFI_STA);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+                             status = "Not connected";
+                             state = State::DONE;
+                             requestUpdate();
+                             return;
+                           }
+                           lanNext = 0;
+                           status = "LAN scan...";
+                           state = State::LAN_SCAN;
+                           requestUpdate();
+                         });
+}
+
+void RadioAuditActivity::lanScanPass() {
+  struct netif* nif = netif_default;
+  if (!nif) {
+    status = "No network interface";
+    finishLanScan();
+    return;
+  }
+
+  // First tick: derive the local /24 and reset the host table.
+  if (lanNext == 0) {
+    const IPAddress local = WiFi.localIP();
+    const IPAddress gw = WiFi.gatewayIP();
+    if (static_cast<uint32_t>(local) == 0) {
+      status = "No IP address";
+      finishLanScan();
+      return;
+    }
+    lanBase = (static_cast<uint32_t>(local[0]) << 24) | (static_cast<uint32_t>(local[1]) << 16) |
+              (static_cast<uint32_t>(local[2]) << 8);
+    lanGateway = (static_cast<uint32_t>(gw[0]) << 24) | (static_cast<uint32_t>(gw[1]) << 16) |
+                 (static_cast<uint32_t>(gw[2]) << 8) | gw[3];
+    lanHosts.clear();
+    lanHosts.reserve(64);
+    lanNext = 1;
+    lanDrain = 0;
+  }
+
+  const IPAddress local = WiFi.localIP();
+  // Send a batch of ARP who-has, then harvest the (small, 10-entry) ARP table.
+  // etharp_* must run under the TCPIP core lock (CONFIG_LWIP_TCPIP_CORE_LOCKING).
+  LOCK_TCPIP_CORE();
+  for (int k = 0; k < LAN_BATCH && lanNext <= 254; k++, lanNext++) {
+    ip4_addr_t a;
+    IP4_ADDR(&a, local[0], local[1], local[2], static_cast<uint8_t>(lanNext));
+    etharp_request(nif, &a);
+  }
+  ip4_addr_t* ip;
+  struct netif* n;
+  struct eth_addr* eth;
+  for (size_t i = 0; i < ARP_TABLE_SIZE; i++) {
+    if (!etharp_get_entry(i, &ip, &n, &eth)) continue;
+    const uint32_t hip = (static_cast<uint32_t>(ip4_addr1(ip)) << 24) | (static_cast<uint32_t>(ip4_addr2(ip)) << 16) |
+                         (static_cast<uint32_t>(ip4_addr3(ip)) << 8) | ip4_addr4(ip);
+    if ((hip & 0xFFFFFF00u) != lanBase) continue;  // only our subnet
+    bool seen = false;
+    for (const auto& h : lanHosts)
+      if (h.ip == hip) {
+        seen = true;
+        break;
+      }
+    if (seen || lanHosts.size() >= LAN_MAX_HOSTS) continue;
+    char macbuf[18];
+    snprintf(macbuf, sizeof(macbuf), "%02X:%02X:%02X:%02X:%02X:%02X", eth->addr[0], eth->addr[1], eth->addr[2],
+             eth->addr[3], eth->addr[4], eth->addr[5]);
+    LanHost host;
+    host.ip = hip;
+    host.mac = macbuf;
+    lanHosts.push_back(std::move(host));
+  }
+  UNLOCK_TCPIP_CORE();
+
+  status =
+      (String("LAN ") + (lanNext <= 254 ? lanNext : 254) + "/254  found " + static_cast<int>(lanHosts.size())).c_str();
+  requestUpdate();
+
+  if (lanNext > 254 && ++lanDrain > LAN_DRAIN_TICKS) finishLanScan();
+}
+
+void RadioAuditActivity::finishLanScan() {
+  // Resolve vendors now (macVendor does SD I/O — kept out of the ARP-lock loop).
+  for (auto& h : lanHosts)
+    if (h.vendor.empty() && !h.mac.empty()) h.vendor = macVendor(h.mac);
+
+  std::sort(lanHosts.begin(), lanHosts.end(), [](const LanHost& a, const LanHost& b) { return a.ip < b.ip; });
+
+  // ARP spoof / MITM check: in a healthy LAN each MAC answers for exactly one
+  // IP. The same MAC claiming multiple IPs in one ARP-table snapshot -- most
+  // alarmingly the gateway's IP plus another host -- is the classic ARP-spoof
+  // signature (an attacker impersonating both ends of a connection). Reuses
+  // the ip+mac data the sweep already collected -- no extra capture needed.
+  std::vector<std::string> dupMacs;
+  for (size_t i = 0; i < lanHosts.size(); i++) {
+    if (lanHosts[i].mac.empty()) continue;
+    bool already = false;
+    for (const auto& m : dupMacs)
+      if (m == lanHosts[i].mac) already = true;
+    if (already) continue;
+    std::vector<uint32_t> ips = {lanHosts[i].ip};
+    for (size_t j = i + 1; j < lanHosts.size(); j++)
+      if (lanHosts[j].mac == lanHosts[i].mac) ips.push_back(lanHosts[j].ip);
+    if (ips.size() < 2) continue;
+    dupMacs.push_back(lanHosts[i].mac);
+
+    char ipbuf[24];
+    std::string ipList;
+    bool involvesGateway = false;
+    for (uint32_t ip : ips) {
+      snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+      if (!ipList.empty()) ipList += ", ";
+      ipList += ipbuf;
+      if (ip == lanGateway) involvesGateway = true;
+    }
+    const std::string msg = lanHosts[i].mac + " answers for " + std::to_string(ips.size()) + " IPs (" + ipList + ")" +
+                            (involvesGateway ? " - includes the GATEWAY" : "") + " - possible ARP spoofing / MITM.";
+    addAuditFinding(involvesGateway ? "HIGH" : "MED", "Possible ARP spoofing", msg);
+  }
+
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);  // return the radio to a clean idle state (matches mDNS browser)
+
+  targetTitle = "LAN Hosts";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+  char ipbuf[24];
+  for (const auto& h : lanHosts) {
+    const bool dup = std::find(dupMacs.begin(), dupMacs.end(), h.mac) != dupMacs.end();
+    snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u%s", (h.ip >> 24) & 0xFF, (h.ip >> 16) & 0xFF, (h.ip >> 8) & 0xFF,
+             h.ip & 0xFF, h.ip == lanGateway ? " (gw)" : "");
+    targetLines.push_back(ipbuf);
+    targetLines.push_back("  " + h.mac + (h.vendor.empty() ? "" : "  " + h.vendor) + (dup ? "  [DUP MAC]" : ""));
+  }
+  if (lanHosts.empty()) targetLines.push_back("No hosts responded.");
+  if (!dupMacs.empty()) {
+    targetLines.push_back("");
+    targetLines.push_back(std::to_string(dupMacs.size()) + " MAC(s) answered for multiple IPs - see Audit Findings.");
+  }
+
+  status = (String("LAN: ") + static_cast<int>(lanHosts.size()) + " host(s)").c_str();
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- WPS Audit (Results) ---
+
+void RadioAuditActivity::showWpsAudit() {
+  if (wifiFindings.empty()) {
+    status = "Run a WiFi scan first";
+    requestUpdate();
+    return;
+  }
+  targetTitle = "WPS Audit";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+  int count = 0;
+  for (const auto& w : wifiFindings) {
+    if (!w.wps) continue;
+    targetLines.push_back(w.ssid.empty() ? std::string("<hidden>") : w.ssid);
+    targetLines.push_back("  " + w.bssid + "  CH" + std::to_string(w.channel) + "  " + w.auth);
+    count++;
+  }
+  if (count == 0) targetLines.push_back("No WPS-enabled APs in last scan.");
+  status = (String("WPS: ") + count + " AP(s)").c_str();
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- System Stats (Results) ---
+
+void RadioAuditActivity::showSystemStats() {
+  targetTitle = "System Stats";
+  targetLines.clear();
+  targetLines.reserve(12);
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+  char b[64];
+  snprintf(b, sizeof(b), "FW: %s", RADIOINK_VERSION);
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Chip: %s rev %d", ESP.getChipModel(), static_cast<int>(ESP.getChipRevision()));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "CPU: %u MHz  x%d", static_cast<unsigned>(ESP.getCpuFreqMHz()),
+           static_cast<int>(ESP.getChipCores()));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Free heap: %u B", static_cast<unsigned>(ESP.getFreeHeap()));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Max alloc: %u B", static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Min free: %u B", static_cast<unsigned>(ESP.getMinFreeHeap()));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Flash: %u MB", static_cast<unsigned>(ESP.getFlashChipSize() / (1024 * 1024)));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Temp: %.1f C", temperatureRead());
+  targetLines.push_back(b);
+  const uint64_t up = static_cast<uint64_t>(esp_timer_get_time() / 1000000);
+  snprintf(b, sizeof(b), "Uptime: %02uh %02um %02us", static_cast<unsigned>(up / 3600),
+           static_cast<unsigned>((up / 60) % 60), static_cast<unsigned>(up % 60));
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "STA MAC: %s", WiFi.macAddress().c_str());
+  targetLines.push_back(b);
+  status = "Device diagnostics";
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- I2C Bus Scan (Results) — hunt for the X3's NFC chip ---
+
+namespace {
+// Label a responding I2C address: the three chips we already drive, plus common
+// NFC controller/tag addresses flagged as candidates (the X3 has NFC; find it).
+const char* i2cLabel(uint8_t a) {
+  switch (a) {
+    case 0x55:
+      return "BQ27220 battery";
+    case 0x68:
+      return "DS3231 RTC";
+    case 0x6A:
+    case 0x6B:
+      return "QMI8658 IMU";
+    case 0x24:
+    case 0x48:
+      return "PN532 NFC? reader/emu";
+    case 0x28:
+    case 0x2C:
+    case 0x2D:
+      return "ST25 NFC? dyn tag";
+    case 0x50:
+    case 0x51:
+    case 0x52:
+    case 0x53:
+    case 0x54:
+    case 0x56:
+    case 0x57:
+      return "NTAG/ST25/EEPROM? NFC candidate";
+    default:
+      return "unknown";
+  }
+}
+}  // namespace
+
+void RadioAuditActivity::showI2cScan() {
+  status = "Scanning I2C...";
+  showingTarget = false;
+  requestUpdateAndWait();
+
+  targetTitle = "I2C Bus Scan";
+  targetLines.clear();
+  targetLines.reserve(16);
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+
+  int found = 0;
+  char b[64];
+  for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {  // device ACKed its address
+      snprintf(b, sizeof(b), "0x%02X  %s", addr, i2cLabel(addr));
+      targetLines.push_back(b);
+      found++;
+    }
+  }
+  if (found == 0) targetLines.push_back("No I2C devices responded.");
+  targetLines.push_back("");
+  targetLines.push_back("Known: 0x55 batt, 0x68 RTC, 0x6B IMU.");
+  targetLines.push_back("Anything else = NFC candidate.");
+
+  status = (String("I2C: ") + found + " device(s)").c_str();
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- NTP Time Sync (Network) ---
+
+void RadioAuditActivity::startNtpSync() {
+  // Needs an internet route, so we must be associated. Reuse an existing
+  // connection (e.g. left over from mDNS/LAN), else hand off to the Wi-Fi picker.
+  if (WiFi.status() == WL_CONNECTED) {
+    doNtpSync();
+    return;
+  }
+  shutdownBleController();
+  WiFi.mode(WIFI_STA);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+                             status = "Not connected";
+                             state = State::DONE;
+                             requestUpdate();
+                             return;
+                           }
+                           doNtpSync();
+                         });
+}
+
+void RadioAuditActivity::doNtpSync() {
+  status = "Syncing clock (NTP)...";
+  showingTarget = false;
+  requestUpdateAndWait();  // paint the status before the ~5 s blocking SNTP wait
+
+  const bool ok = halClock.syncFromNTP();
+
+  targetTitle = "NTP Time Sync";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+
+  if (ok) {
+    SETTINGS.clockHasBeenSynced = 1;  // stops the auto-sync hook firing on later connects
+    SETTINGS.saveToFile();
+    char buf[16];
+    if (halClock.formatTime(buf, sizeof(buf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1))
+      targetLines.push_back(std::string("Clock set: ") + buf);
+    else
+      targetLines.push_back("RTC updated from NTP.");
+    targetLines.push_back("Captures are now timestamped.");
+    status = "Synced";
+  } else {
+    targetLines.push_back("NTP sync failed.");
+    targetLines.push_back("No reply from the time server.");
+    status = "Failed";
+  }
+
+  // Return the radio to a clean idle state (matches finishMdnsQuery / finishLanScan).
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- Network Info + ping (Network) ---
+
+namespace {
+// Synchronous ICMP ping of a single host (a few packets), built on esp_ping. The
+// ping runs in its own task; we wait on a flag the end-callback sets, then read
+// the profile counters. Returns true if at least one reply came back.
+volatile bool g_pingDone = false;
+uint32_t g_pingTx = 0, g_pingRx = 0, g_pingMs = 0;
+ip_addr_t g_pingReplyIp;
+
+void pingEndCb(esp_ping_handle_t hdl, void* /*args*/) {
+  esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &g_pingTx, sizeof(g_pingTx));
+  esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &g_pingRx, sizeof(g_pingRx));
+  esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &g_pingMs, sizeof(g_pingMs));
+  // IPADDR reports whoever actually replied -- for a TTL-limited probe (see
+  // pingWithTtl below) that's the intermediate router that sent the ICMP
+  // Time-Exceeded, exactly what a traceroute hop needs.
+  esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &g_pingReplyIp, sizeof(g_pingReplyIp));
+  g_pingDone = true;
+}
+
+bool pingHost(const IPAddress& ip, uint32_t& avgMs, uint32_t& rx, uint32_t& tx) {
+  char ipStr[16];
+  snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+  ip_addr_t target;
+  if (!ipaddr_aton(ipStr, &target)) return false;
+
+  esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+  cfg.target_addr = target;
+  cfg.count = 3;
+  cfg.timeout_ms = 800;
+  cfg.interval_ms = 200;
+  esp_ping_callbacks_t cbs = {};
+  cbs.on_ping_end = pingEndCb;
+
+  esp_ping_handle_t hdl = nullptr;
+  if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK || !hdl) return false;
+  g_pingDone = false;
+  g_pingTx = g_pingRx = g_pingMs = 0;
+  esp_ping_start(hdl);
+  uint32_t waited = 0;
+  while (!g_pingDone && waited < 4000) {  // bounded; feeds the WDT via vTaskDelay
+    delay(50);
+    waited += 50;
+  }
+  esp_ping_stop(hdl);
+  esp_ping_delete_session(hdl);
+
+  rx = g_pingRx;
+  tx = g_pingTx;
+  avgMs = g_pingRx ? g_pingMs / g_pingRx : 0;
+  return g_pingRx > 0;
+}
+
+// Single TTL-limited echo request for Traceroute. Whoever replies (the final
+// target, or an intermediate router via ICMP Time-Exceeded) is reported through
+// ESP_PING_PROF_IPADDR. Returns true if anything replied within the timeout.
+bool pingWithTtl(const IPAddress& ip, uint8_t ttl, uint32_t& ms, IPAddress& replyFrom) {
+  char ipStr[16];
+  snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+  ip_addr_t target;
+  if (!ipaddr_aton(ipStr, &target)) return false;
+
+  esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+  cfg.target_addr = target;
+  cfg.count = 1;
+  cfg.timeout_ms = 800;
+  cfg.ttl = ttl;
+  esp_ping_callbacks_t cbs = {};
+  cbs.on_ping_end = pingEndCb;
+
+  esp_ping_handle_t hdl = nullptr;
+  if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK || !hdl) return false;
+  g_pingDone = false;
+  g_pingRx = g_pingMs = 0;
+  esp_ping_start(hdl);
+  uint32_t waited = 0;
+  while (!g_pingDone && waited < 1200) {  // bounded; feeds the WDT via vTaskDelay
+    delay(50);
+    waited += 50;
+  }
+  esp_ping_stop(hdl);
+  esp_ping_delete_session(hdl);
+
+  if (g_pingRx == 0) return false;
+  ms = g_pingMs;
+  const uint32_t v4 = ip4_addr_get_u32(ip_2_ip4(&g_pingReplyIp));
+  replyFrom = IPAddress(v4 & 0xFF, (v4 >> 8) & 0xFF, (v4 >> 16) & 0xFF, (v4 >> 24) & 0xFF);
+  return true;
+}
+}  // namespace
+
+void RadioAuditActivity::startNetInfo() {
+  if (WiFi.status() == WL_CONNECTED) {
+    doNetInfo();
+    return;
+  }
+  shutdownBleController();
+  WiFi.mode(WIFI_STA);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+                             status = "Not connected";
+                             state = State::DONE;
+                             requestUpdate();
+                             return;
+                           }
+                           doNetInfo();
+                         });
+}
+
+void RadioAuditActivity::doNetInfo() {
+  status = "Pinging...";
+  showingTarget = false;
+  requestUpdateAndWait();  // paint status before the blocking pings
+
+  targetTitle = "Network Info";
+  targetLines.clear();
+  targetLines.reserve(12);
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+
+  const IPAddress gw = WiFi.gatewayIP();
+  char b[80];
+  snprintf(b, sizeof(b), "SSID: %s", WiFi.SSID().c_str());
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "IP: %s", WiFi.localIP().toString().c_str());
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Gateway: %s", gw.toString().c_str());
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "Mask: %s", WiFi.subnetMask().toString().c_str());
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "DNS: %s", WiFi.dnsIP().toString().c_str());
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "MAC: %s", WiFi.macAddress().c_str());
+  targetLines.push_back(b);
+  snprintf(b, sizeof(b), "RSSI: %d dBm  CH%d", static_cast<int>(WiFi.RSSI()), WiFi.channel());
+  targetLines.push_back(b);
+
+  uint32_t avg, rx, tx;
+  if (gw != IPAddress(0, 0, 0, 0) && pingHost(gw, avg, rx, tx))
+    snprintf(b, sizeof(b), "Gateway ping: %ums (%u/%u)", static_cast<unsigned>(avg), static_cast<unsigned>(rx),
+             static_cast<unsigned>(tx));
+  else
+    snprintf(b, sizeof(b), "Gateway ping: no reply");
+  targetLines.push_back(b);
+
+  const IPAddress inet(8, 8, 8, 8);
+  if (pingHost(inet, avg, rx, tx))
+    snprintf(b, sizeof(b), "Internet (8.8.8.8): %ums (%u/%u)", static_cast<unsigned>(avg), static_cast<unsigned>(rx),
+             static_cast<unsigned>(tx));
+  else
+    snprintf(b, sizeof(b), "Internet (8.8.8.8): no reply");
+  targetLines.push_back(b);
+
+  // Return the radio to a clean idle state (matches the other Network tools).
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  status = "Network details";
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- Port Probe + HTTP banner (Network) ---
+
+namespace {
+struct PortDef {
+  uint16_t port;
+  const char* name;
+  bool http;  // grab an HTTP banner on this port
+};
+// A curated set of common service ports (not an exhaustive scan).
+constexpr PortDef PROBE_PORTS[] = {
+    {21, "ftp", false},   {22, "ssh", false},   {23, "telnet", false},   {25, "smtp", false},  {53, "dns", false},
+    {80, "http", true},   {110, "pop3", false}, {139, "netbios", false}, {143, "imap", false}, {443, "https", false},
+    {445, "smb", false},  {554, "rtsp", false}, {1883, "mqtt", false},   {3389, "rdp", false}, {5000, "http", true},
+    {8000, "http", true}, {8080, "http", true}, {8443, "https", false},  {8888, "http", true}, {9100, "printer", false},
+};
+constexpr int PROBE_PORT_COUNT = sizeof(PROBE_PORTS) / sizeof(PROBE_PORTS[0]);
+constexpr int PROBE_TIMEOUT_MS = 600;
+
+// Fetch "/" and pull the Server: header + <title> for fingerprinting. Bounded
+// read; case-insensitive search against a lowercased copy (indices align).
+std::string httpBanner(WiFiClient& client, const String& host) {
+  client.print(String("GET / HTTP/1.0\r\nHost: ") + host + "\r\nUser-Agent: RadioInk\r\nConnection: close\r\n\r\n");
+  String resp;
+  resp.reserve(1600);
+  const uint32_t deadline = millis() + 800;
+  while (millis() < deadline && resp.length() < 1500) {
+    while (client.available() && resp.length() < 1500) resp += static_cast<char>(client.read());
+    if (!client.connected() && !client.available()) break;
+    delay(10);
+  }
+  String low = resp;
+  low.toLowerCase();
+  std::string out;
+  const int s = low.indexOf("server:");
+  if (s >= 0) {
+    int e = resp.indexOf('\r', s);
+    if (e < 0) e = resp.indexOf('\n', s);
+    if (e < 0) e = resp.length();
+    String val = resp.substring(s + 7, e);
+    val.trim();
+    if (val.length()) out += std::string("[") + val.c_str() + "]";
+  }
+  const int t = low.indexOf("<title>");
+  if (t >= 0) {
+    int e = low.indexOf("</title>", t);
+    if (e < 0) e = resp.length();
+    String title = resp.substring(t + 7, e);
+    title.trim();
+    if (title.length()) {
+      if (!out.empty()) out += " ";
+      out += std::string("\"") + title.c_str() + "\"";
+    }
+  }
+  return out;
+}
+}  // namespace
+
+void RadioAuditActivity::startPortProbe() {
+  // Ask for the target IP first (typeable without a connection); the URL keyboard
+  // offers a "192.168." snippet. Default to the gateway when already associated.
+  const String prefill = (WiFi.status() == WL_CONNECTED) ? WiFi.gatewayIP().toString() : String("192.168.1.1");
+  startActivityForResult(
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "Target IP", std::string(prefill.c_str()), 40,
+                                              InputType::Url, true),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        IPAddress ip;
+        if (!ip.fromString(std::get<KeyboardResult>(result.data).text.c_str())) {
+          status = "Invalid IP";
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        probeTarget = ip;
+        if (WiFi.status() == WL_CONNECTED) {
+          beginPortProbe();
+          return;
+        }
+        shutdownBleController();
+        WiFi.mode(WIFI_STA);
+        startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                               [this](const ActivityResult& r) {
+                                 if (r.isCancelled || WiFi.status() != WL_CONNECTED) {
+                                   status = "Not connected";
+                                   state = State::DONE;
+                                   requestUpdate();
+                                   return;
+                                 }
+                                 beginPortProbe();
+                               });
+      });
+}
+
+void RadioAuditActivity::beginPortProbe() {
+  probePortIdx = 0;
+  probeOpen.clear();
+  probeOpen.reserve(8);
+  status = "Probing...";
+  showingTarget = false;
+  state = State::PORT_PROBE;
+  requestUpdate();
+}
+
+void RadioAuditActivity::portProbePass() {
+  if (probePortIdx >= PROBE_PORT_COUNT) {
+    finishPortProbe();
+    return;
+  }
+  const PortDef& pd = PROBE_PORTS[probePortIdx];
+  status = (String("Probing ") + pd.port + " (" + (probePortIdx + 1) + "/" + PROBE_PORT_COUNT + ")  open " +
+            static_cast<int>(probeOpen.size()))
+               .c_str();
+  requestUpdateAndWait();  // paint progress before the blocking connect
+
+  WiFiClient client;
+  if (client.connect(probeTarget, pd.port, PROBE_TIMEOUT_MS)) {
+    std::string line = std::to_string(pd.port) + "  " + pd.name;
+    if (pd.http) {
+      const std::string banner = httpBanner(client, probeTarget.toString());
+      if (!banner.empty()) line += "  " + banner;
+    }
+    probeOpen.push_back(line);
+  }
+  client.stop();
+  probePortIdx++;
+  requestUpdate();
+}
+
+void RadioAuditActivity::finishPortProbe() {
+  targetTitle = (String("Ports ") + probeTarget.toString()).c_str();
+  targetLines = probeOpen;
+  if (targetLines.empty()) targetLines.push_back("No open ports found.");
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+  status = (String("Open: ") + static_cast<int>(probeOpen.size())).c_str();
+
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- Subnet Calculator (Network) -- pure offline math, no radio needed ---
+
+void RadioAuditActivity::showSubnetCalc() {
+  startActivityForResult(
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "IP/CIDR e.g. 192.168.1.0/24", "192.168.1.0/24",
+                                              32, InputType::Url, true),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        const std::string text = std::get<KeyboardResult>(result.data).text;
+        const size_t slash = text.find('/');
+        IPAddress ip;
+        int prefix = -1;
+        bool ok = false;
+        if (slash != std::string::npos) {
+          ok = ip.fromString(text.substr(0, slash).c_str());
+          prefix = atoi(text.substr(slash + 1).c_str());
+        }
+
+        targetTitle = "Subnet Calculator";
+        targetLines.clear();
+        targetScroll = 0;
+        targetFromList = false;
+        targetFromCameraList = false;
+        targetFromMdnsList = false;
+        targetLocatable = false;
+
+        if (!ok || prefix < 0 || prefix > 32) {
+          targetLines.push_back("Invalid input. Use IP/CIDR, e.g.");
+          targetLines.push_back("192.168.1.10/24");
+          status = "Invalid input";
+        } else {
+          const uint32_t ipHost = (static_cast<uint32_t>(ip[0]) << 24) | (static_cast<uint32_t>(ip[1]) << 16) |
+                                  (static_cast<uint32_t>(ip[2]) << 8) | ip[3];
+          const uint32_t mask = prefix == 0 ? 0 : (0xFFFFFFFFu << (32 - prefix));
+          const uint32_t network = ipHost & mask;
+          const uint32_t broadcast = network | ~mask;
+          const uint64_t total = 1ULL << (32 - prefix);
+          auto fmtIp = [](uint32_t v) {
+            char b[24];
+            snprintf(b, sizeof(b), "%u.%u.%u.%u", (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            return std::string(b);
+          };
+          targetLines.push_back("Address: " + fmtIp(ipHost) + "/" + std::to_string(prefix));
+          targetLines.push_back("Netmask: " + fmtIp(mask));
+          targetLines.push_back("Network: " + fmtIp(network));
+          targetLines.push_back("Broadcast: " + fmtIp(broadcast));
+          if (prefix >= 31) {
+            targetLines.push_back("Usable hosts: " + std::to_string(total) + " (point-to-point/single, no split)");
+          } else {
+            targetLines.push_back("First host: " + fmtIp(network + 1));
+            targetLines.push_back("Last host: " + fmtIp(broadcast - 1));
+            targetLines.push_back("Usable hosts: " + std::to_string(total - 2));
+          }
+          status = "Subnet calculated";
+        }
+        showingTarget = true;
+        showingDetails = false;
+        showingFindings = false;
+        state = State::DONE;
+        requestUpdate();
+      });
+}
+
+// --- Traceroute (Network) ---
+
+void RadioAuditActivity::startTraceroute() {
+  const String prefill = (WiFi.status() == WL_CONNECTED) ? WiFi.gatewayIP().toString() : String("8.8.8.8");
+  startActivityForResult(
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "Target IP", std::string(prefill.c_str()), 40,
+                                              InputType::Url, true),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        IPAddress ip;
+        if (!ip.fromString(std::get<KeyboardResult>(result.data).text.c_str())) {
+          status = "Invalid IP";
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        tracerouteTarget = ip;
+        if (WiFi.status() == WL_CONNECTED) {
+          beginTraceroute();
+          return;
+        }
+        shutdownBleController();
+        WiFi.mode(WIFI_STA);
+        startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                               [this](const ActivityResult& r) {
+                                 if (r.isCancelled || WiFi.status() != WL_CONNECTED) {
+                                   status = "Not connected";
+                                   state = State::DONE;
+                                   requestUpdate();
+                                   return;
+                                 }
+                                 beginTraceroute();
+                               });
+      });
+}
+
+void RadioAuditActivity::beginTraceroute() {
+  tracerouteTtl = 1;
+  tracerouteHops.clear();
+  tracerouteHops.reserve(16);
+  status = "Tracing...";
+  showingTarget = false;
+  state = State::TRACEROUTE;
+  requestUpdate();
+}
+
+void RadioAuditActivity::traceroutePass() {
+  constexpr int MAX_HOPS = 20;
+  if (tracerouteTtl > MAX_HOPS) {
+    finishTraceroute();
+    return;
+  }
+  status = (String("Hop ") + tracerouteTtl + "/" + MAX_HOPS).c_str();
+  requestUpdateAndWait();  // paint progress before the blocking ping
+
+  uint32_t ms = 0;
+  IPAddress replyFrom(0, 0, 0, 0);
+  const bool replied = pingWithTtl(tracerouteTarget, static_cast<uint8_t>(tracerouteTtl), ms, replyFrom);
+
+  char line[48];
+  if (!replied) {
+    snprintf(line, sizeof(line), "%2d  * (no reply)", tracerouteTtl);
+  } else {
+    snprintf(line, sizeof(line), "%2d  %s  %ums", tracerouteTtl, replyFrom.toString().c_str(),
+             static_cast<unsigned>(ms));
+  }
+  tracerouteHops.push_back(line);
+
+  const bool reachedTarget = replied && replyFrom == tracerouteTarget;
+  tracerouteTtl++;
+  if (reachedTarget) {
+    finishTraceroute();
+    return;
+  }
+  requestUpdate();
+}
+
+void RadioAuditActivity::finishTraceroute() {
+  targetTitle = (String("Trace ") + tracerouteTarget.toString()).c_str();
+  targetLines = tracerouteHops;
+  if (targetLines.empty()) targetLines.push_back("No hops recorded.");
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+  status = (String("Hops: ") + static_cast<int>(tracerouteHops.size())).c_str();
+
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- Rogue DHCP Probe (Network) ---
+
+namespace {
+constexpr uint16_t DHCP_CLIENT_PORT = 68;
+constexpr uint16_t DHCP_SERVER_PORT = 67;
+
+// Minimal DHCPDISCOVER (RFC 2131): fixed 236-byte BOOTP header + 4-byte magic
+// cookie + a short option list. The broadcast flag is set so servers reply via
+// broadcast (we have no configured IP of our own in this packet).
+std::vector<uint8_t> buildDhcpDiscover(const uint8_t mac[6], uint32_t xid) {
+  std::vector<uint8_t> pkt(240, 0);
+  pkt[0] = 1;  // op: BOOTREQUEST
+  pkt[1] = 1;  // htype: Ethernet
+  pkt[2] = 6;  // hlen
+  pkt[4] = static_cast<uint8_t>(xid >> 24);
+  pkt[5] = static_cast<uint8_t>(xid >> 16);
+  pkt[6] = static_cast<uint8_t>(xid >> 8);
+  pkt[7] = static_cast<uint8_t>(xid);
+  pkt[10] = 0x80;            // flags: broadcast bit
+  memcpy(&pkt[28], mac, 6);  // chaddr[16] (28-43): first 6 bytes = client MAC
+  pkt[236] = 99;
+  pkt[237] = 130;
+  pkt[238] = 83;
+  pkt[239] = 99;  // magic cookie
+  pkt.push_back(53);
+  pkt.push_back(1);
+  pkt.push_back(1);    // option 53: DHCP Message Type = DISCOVER
+  pkt.push_back(255);  // end option
+  return pkt;
+}
+}  // namespace
+
+void RadioAuditActivity::startDhcpProbe() {
+  if (WiFi.status() == WL_CONNECTED) {
+    doDhcpProbe();
+    return;
+  }
+  shutdownBleController();
+  WiFi.mode(WIFI_STA);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+                             status = "Not connected";
+                             state = State::DONE;
+                             requestUpdate();
+                             return;
+                           }
+                           doDhcpProbe();
+                         });
+}
+
+void RadioAuditActivity::doDhcpProbe() {
+  status = "Probing for DHCP servers...";
+  showingTarget = false;
+  requestUpdateAndWait();
+
+  targetTitle = "Rogue DHCP Probe";
+  targetLines.clear();
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  const uint32_t xid = esp_random();
+  const std::vector<uint8_t> discover = buildDhcpDiscover(mac, xid);
+
+  // The device's own WiFi association already holds UDP port 68 for lease
+  // renewal; SO_REUSEADDR (set by NetworkUDP::begin) + lwip's SO_REUSE_RXTOALL
+  // (enabled in this SDK) let a second listener bind alongside it and still
+  // see broadcast replies.
+  WiFiUDP udp;
+  std::vector<std::string> servers;  // distinct "ip  offers <lease-ip>" lines
+  if (!udp.begin(DHCP_CLIENT_PORT)) {
+    targetLines.push_back("Could not bind UDP port 68.");
+    status = "Probe failed";
+  } else {
+    udp.beginPacket(IPAddress(255, 255, 255, 255), DHCP_SERVER_PORT);
+    udp.write(discover.data(), discover.size());
+    udp.endPacket();
+
+    auto buf = makeUniqueNoThrow<uint8_t[]>(512);
+    if (buf) {
+      const uint32_t deadline = millis() + 3000;
+      while (millis() < deadline) {
+        const int len = udp.parsePacket();
+        if (len > 240) {
+          const int n = udp.read(buf.get(), 512);
+          // Match our transaction id + the DHCP magic cookie on a BOOTREPLY, so
+          // unrelated broadcast traffic on the segment doesn't get counted.
+          if (n >= 240 && buf[0] == 2 && buf[4] == static_cast<uint8_t>(xid >> 24) &&
+              buf[5] == static_cast<uint8_t>(xid >> 16) && buf[6] == static_cast<uint8_t>(xid >> 8) &&
+              buf[7] == static_cast<uint8_t>(xid) && buf[236] == 99 && buf[237] == 130 && buf[238] == 83 &&
+              buf[239] == 99) {
+            IPAddress serverIp = udp.remoteIP();
+            int i = 240;  // scan options for tag 54 (server identifier), preferred over the packet source
+            while (i + 1 < n) {
+              const uint8_t tag = buf[i];
+              if (tag == 255) break;
+              if (tag == 0) {
+                i++;
+                continue;
+              }
+              const uint8_t optLen = buf[i + 1];
+              if (tag == 54 && optLen == 4 && i + 5 < n)
+                serverIp = IPAddress(buf[i + 2], buf[i + 3], buf[i + 4], buf[i + 5]);
+              i += 2 + optLen;
+            }
+            char yi[24];
+            snprintf(yi, sizeof(yi), "%u.%u.%u.%u", buf[16], buf[17], buf[18], buf[19]);
+            const std::string line = std::string(serverIp.toString().c_str()) + "  offers " + yi;
+            bool seen = false;
+            for (const auto& s : servers)
+              if (s == line) {
+                seen = true;
+                break;
+              }
+            if (!seen) servers.push_back(line);
+          }
+        }
+        delay(20);
+      }
+    }
+    udp.stop();
+
+    if (servers.empty()) {
+      targetLines.push_back("No DHCP servers responded.");
+    } else {
+      for (const auto& s : servers) targetLines.push_back(s);
+      if (servers.size() > 1) {
+        targetLines.push_back("");
+        targetLines.push_back(std::to_string(servers.size()) + " DIFFERENT servers answered -");
+        targetLines.push_back("possible rogue DHCP server on this network.");
+      }
+    }
+    status = (String("DHCP servers: ") + static_cast<int>(servers.size())).c_str();
+  }
+
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+// --- SNMP Sweep (Network) ---
+
+namespace {
+constexpr uint16_t SNMP_PORT = 161;
+constexpr const char* SNMP_COMMUNITIES[] = {"public", "private", "community", "admin", "manager", "cisco"};
+constexpr int SNMP_COMMUNITY_COUNT = sizeof(SNMP_COMMUNITIES) / sizeof(SNMP_COMMUNITIES[0]);
+
+// Short-form BER only (length < 128) -- true for every field in this tiny
+// SNMPv1 GetRequest, since community strings/OIDs here are all short.
+void berAppendTLV(std::vector<uint8_t>& out, uint8_t tag, const std::vector<uint8_t>& value) {
+  out.push_back(tag);
+  out.push_back(static_cast<uint8_t>(value.size()));
+  out.insert(out.end(), value.begin(), value.end());
+}
+
+// SNMPv1 GetRequest for sysDescr.0 (OID 1.3.6.1.2.1.1.1.0) with the given
+// community string, used to check whether that community grants read access.
+std::vector<uint8_t> buildSnmpGetRequest(const std::string& community, uint8_t requestId) {
+  static constexpr uint8_t SYS_DESCR_OID[] = {0x2B, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00};
+
+  std::vector<uint8_t> oidTlv, nullTlv, varBind, varBindList;
+  berAppendTLV(oidTlv, 0x06, std::vector<uint8_t>(SYS_DESCR_OID, SYS_DESCR_OID + sizeof(SYS_DESCR_OID)));
+  berAppendTLV(nullTlv, 0x05, {});
+  std::vector<uint8_t> varBindInner(oidTlv);
+  varBindInner.insert(varBindInner.end(), nullTlv.begin(), nullTlv.end());
+  berAppendTLV(varBind, 0x30, varBindInner);
+  berAppendTLV(varBindList, 0x30, varBind);
+
+  std::vector<uint8_t> reqId, errStatus, errIndex, pdu;
+  berAppendTLV(reqId, 0x02, {requestId});
+  berAppendTLV(errStatus, 0x02, {0x00});
+  berAppendTLV(errIndex, 0x02, {0x00});
+  std::vector<uint8_t> pduInner(reqId);
+  pduInner.insert(pduInner.end(), errStatus.begin(), errStatus.end());
+  pduInner.insert(pduInner.end(), errIndex.begin(), errIndex.end());
+  pduInner.insert(pduInner.end(), varBindList.begin(), varBindList.end());
+  berAppendTLV(pdu, 0xA0, pduInner);  // GetRequest-PDU
+
+  std::vector<uint8_t> version, communityTlv;
+  berAppendTLV(version, 0x02, {0x00});
+  berAppendTLV(communityTlv, 0x04, std::vector<uint8_t>(community.begin(), community.end()));
+
+  std::vector<uint8_t> body(version);
+  body.insert(body.end(), communityTlv.begin(), communityTlv.end());
+  body.insert(body.end(), pdu.begin(), pdu.end());
+
+  std::vector<uint8_t> packet;
+  berAppendTLV(packet, 0x30, body);  // outer SEQUENCE
+  return packet;
+}
+
+// Best-effort extraction of the sysDescr OCTET STRING from a GetResponse: scan
+// for the first tag-0x04 TLV after the header and take it as ASCII text. Not a
+// full BER parser -- just enough to show something readable when it's there.
+std::string extractOctetString(const uint8_t* buf, int n) {
+  for (int i = 10; i + 1 < n; i++) {
+    if (buf[i] == 0x04) {
+      const uint8_t len = buf[i + 1];
+      if (i + 2 + len <= n && len > 0) {
+        std::string s(reinterpret_cast<const char*>(buf + i + 2), len);
+        bool printable = true;
+        for (char c : s)
+          if (c < 0x20 || c > 0x7E) {
+            printable = false;
+            break;
+          }
+        if (printable) return s;
+      }
+    }
+  }
+  return "";
+}
+}  // namespace
+
+void RadioAuditActivity::startSnmpSweep() {
+  const String prefill = (WiFi.status() == WL_CONNECTED) ? WiFi.gatewayIP().toString() : String("192.168.1.1");
+  startActivityForResult(
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "Target IP", std::string(prefill.c_str()), 40,
+                                              InputType::Url, true),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        IPAddress ip;
+        if (!ip.fromString(std::get<KeyboardResult>(result.data).text.c_str())) {
+          status = "Invalid IP";
+          state = State::DONE;
+          requestUpdate();
+          return;
+        }
+        snmpTarget = ip;
+        if (WiFi.status() == WL_CONNECTED) {
+          beginSnmpSweep();
+          return;
+        }
+        shutdownBleController();
+        WiFi.mode(WIFI_STA);
+        startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                               [this](const ActivityResult& r) {
+                                 if (r.isCancelled || WiFi.status() != WL_CONNECTED) {
+                                   status = "Not connected";
+                                   state = State::DONE;
+                                   requestUpdate();
+                                   return;
+                                 }
+                                 beginSnmpSweep();
+                               });
+      });
+}
+
+void RadioAuditActivity::beginSnmpSweep() {
+  snmpCommunityIdx = 0;
+  snmpHits.clear();
+  status = "Trying communities...";
+  showingTarget = false;
+  state = State::SNMP_SWEEP;
+  requestUpdate();
+}
+
+void RadioAuditActivity::snmpSweepPass() {
+  if (snmpCommunityIdx >= SNMP_COMMUNITY_COUNT) {
+    finishSnmpSweep();
+    return;
+  }
+  const char* community = SNMP_COMMUNITIES[snmpCommunityIdx];
+  status = (String("Trying '") + community + "' (" + (snmpCommunityIdx + 1) + "/" + SNMP_COMMUNITY_COUNT + ")").c_str();
+  requestUpdateAndWait();  // paint progress before the blocking UDP round-trip
+
+  const std::vector<uint8_t> req = buildSnmpGetRequest(community, static_cast<uint8_t>(esp_random() & 0xFF));
+  WiFiUDP udp;
+  if (udp.begin(0)) {  // ephemeral local port
+    udp.beginPacket(snmpTarget, SNMP_PORT);
+    udp.write(req.data(), req.size());
+    udp.endPacket();
+
+    auto buf = makeUniqueNoThrow<uint8_t[]>(512);
+    if (buf) {
+      const uint32_t deadline = millis() + 700;
+      while (millis() < deadline) {
+        const int len = udp.parsePacket();
+        if (len > 0) {
+          const int n = udp.read(buf.get(), 512);
+          if (n > 0 && buf[0] == 0x30) {  // any SNMP-shaped reply confirms this community was accepted
+            const std::string descr = extractOctetString(buf.get(), n);
+            snmpHits.push_back(std::string(community) + (descr.empty() ? "" : ("  sysDescr: " + descr)));
+          }
+          break;
+        }
+        delay(20);
+      }
+    }
+    udp.stop();
+  }
+  snmpCommunityIdx++;
+  requestUpdate();
+}
+
+void RadioAuditActivity::finishSnmpSweep() {
+  targetTitle = (String("SNMP ") + snmpTarget.toString()).c_str();
+  targetLines = snmpHits;
+  if (targetLines.empty()) targetLines.push_back("No default community accepted.");
+  targetScroll = 0;
+  targetFromList = false;
+  targetFromCameraList = false;
+  targetFromMdnsList = false;
+  targetLocatable = false;
+  status = (String("Accepted: ") + static_cast<int>(snmpHits.size())).c_str();
+
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+
+  showingTarget = true;
+  showingDetails = false;
+  showingFindings = false;
+  state = State::DONE;
+  requestUpdate();
+}
+
+namespace {
+// Structured iBeacon/Eddystone breakdown for the BLE deep-scan detail view.
+// decodeBleAdvert() (RadioAuditHelpers) already folds these into one summary
+// line ("iBeacon <uuid> <major>/<minor>"); this re-parses the same raw bytes
+// to show UUID/major/minor or the Eddystone frame fields as separate rows.
+void appendBeaconDetail(std::vector<std::string>& lines, const std::string& advType, const std::string& manufacturerHex,
+                        const std::string& serviceDataHex) {
+  if (advType.rfind("iBeacon", 0) == 0) {
+    const std::vector<uint8_t> m = hexToBytes(manufacturerHex);
+    if (m.size() >= 25 && m[0] == 0x4C && m[1] == 0x00 && m[2] == 0x02 && m[3] == 0x15) {
+      char uuidStr[40];
+      snprintf(uuidStr, sizeof(uuidStr), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", m[4],
+               m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15], m[16], m[17], m[18], m[19]);
+      const uint16_t major = (static_cast<uint16_t>(m[20]) << 8) | m[21];
+      const uint16_t minor = (static_cast<uint16_t>(m[22]) << 8) | m[23];
+      const int8_t txCal = static_cast<int8_t>(m[24]);
+      lines.push_back(std::string("  UUID: ") + uuidStr);
+      lines.push_back("  Major: " + std::to_string(major) + "  Minor: " + std::to_string(minor));
+      lines.push_back("  TX@1m: " + std::to_string(txCal) + " dBm");
+    }
+    return;
+  }
+  if (advType.rfind("Eddystone", 0) == 0) {
+    const std::vector<uint8_t> d = hexToBytes(serviceDataHex);
+    if (d.empty()) return;
+    if (d[0] == 0x10) {  // URL frame: [0x10][tx power][scheme][encoded url...]
+      if (d.size() >= 2) lines.push_back("  TX@0m: " + std::to_string(static_cast<int8_t>(d[1])) + " dBm");
+      const std::string url = eddystoneUrl(d);
+      if (!url.empty()) lines.push_back("  URL: " + url);
+    } else if (d[0] == 0x00 && d.size() >= 18) {  // UID frame: [0x00][tx][10B namespace][6B instance]
+      lines.push_back("  TX@0m: " + std::to_string(static_cast<int8_t>(d[1])) + " dBm");
+      lines.push_back("  Namespace: " + bytesToHex(d.data() + 2, 10));
+      lines.push_back("  Instance: " + bytesToHex(d.data() + 12, 6));
+    }
+  }
+}
+}  // namespace
+
 #if defined(RADIO_AUDIT_ENABLE_BLE)
 void RadioAuditActivity::gattEnumerate() {
   targetMenuOpen = false;
@@ -3719,14 +5441,23 @@ void RadioAuditActivity::gattEnumerate() {
       bleReady = true;
     }
     BLEClient* client = BLEDevice::createClient();
+    // Bound the connect (default is portMAX_DELAY = block forever, which freezes the
+    // device if the peer isn't connectable). type 0xFF keeps the library's auto behavior.
+    constexpr uint32_t kConnectTimeoutMs = 8000;
     if (!client) {
       lines.push_back("createClient failed.");
-    } else if (!client->connect(BLEAddress(String(targetLocAddr.c_str())))) {
+    } else if (!client->connect(BLEAddress(String(targetLocAddr.c_str())), 0xFF, kConnectTimeoutMs)) {
       lines.push_back("Connect failed (not connectable");
       lines.push_back("or out of range).");
     } else {
       std::map<std::string, BLERemoteService*>* services = client->getServices();
       lines.push_back(std::string("Services: ") + std::to_string(services ? services->size() : 0));
+      // Security posture: attempt a bounded number of reads on readable characteristics.
+      // A read that returns data proves this session needed no PIN/bonding to get it --
+      // a factual observation, not a vulnerability verdict (a "no-data" result is
+      // ambiguous: could be pairing-gated, or just an empty/unreadable value).
+      constexpr int MAX_POSTURE_READS = 6;
+      int readsAttempted = 0, readsWithData = 0;
       if (services) {
         for (auto& s : *services) {
           BLERemoteService* svc = s.second;
@@ -3740,10 +5471,26 @@ void RadioAuditActivity::gattEnumerate() {
               if (ch->canWrite()) props += "W";
               if (ch->canNotify()) props += "N";
               if (ch->canIndicate()) props += "I";
-              lines.push_back(std::string("  CH ") + ch->getUUID().toString().c_str() + " [" + props + "]");
+              std::string line = std::string("  CH ") + ch->getUUID().toString().c_str() + " [" + props + "]";
+              if (ch->canRead() && readsAttempted < MAX_POSTURE_READS) {
+                readsAttempted++;
+                if (ch->readValue().length() > 0) {
+                  readsWithData++;
+                  line += "  read OK";
+                } else {
+                  line += "  no data";
+                }
+              }
+              lines.push_back(line);
             }
           }
         }
+      }
+      lines.push_back("");
+      lines.push_back("Connected + enumerated with no PIN prompt.");
+      if (readsAttempted > 0) {
+        lines.push_back(std::to_string(readsWithData) + "/" + std::to_string(readsAttempted) +
+                        " reads returned data w/o pairing.");
       }
       client->disconnect();
     }
@@ -3758,6 +5505,131 @@ void RadioAuditActivity::gattEnumerate() {
   targetScroll = 0;
   targetLocatable = false;
   status = "GATT done";
+  showingTarget = true;
+  requestUpdate();
+}
+#endif
+
+#if defined(RADIO_AUDIT_ENABLE_ACTIVE) && defined(RADIO_AUDIT_ENABLE_BLE)
+namespace {
+// A tracker's control-point replies via indication/notification; we just keep the
+// subscription active (some firmware gates the sound on it) and log the response.
+void trackerNotifyCb(BLERemoteCharacteristic* c, uint8_t* data, size_t len, bool /*isNotify*/) {
+  LOG_INF("AIRTAG", "notify %s len=%u b0=0x%02X", c ? c->getUUID().toString().c_str() : "?",
+          static_cast<unsigned>(len), len ? data[0] : 0);
+}
+
+// Try one "play sound" protocol on an already-connected client. Returns 1 = command
+// written (sound should play), 0 = this protocol's service/char is absent, -1 = present
+// but the write was rejected.
+int tryTrackerSound(BLEClient* client, const char* svcUuid, const char* chUuid, const uint8_t* cmd, size_t cmdLen,
+                    uint32_t holdMs, const char* tag) {
+  BLERemoteService* svc = client->getService(BLEUUID(svcUuid));
+  if (!svc) return 0;
+  BLERemoteCharacteristic* ch = svc->getCharacteristic(BLEUUID(chUuid));
+  if (!ch || !ch->canWrite()) return 0;
+  // Subscribe to the control point BEFORE writing — trackers gate the sound on an
+  // active indication (preferred) or notification subscription.
+  if (ch->canIndicate())
+    ch->registerForNotify(trackerNotifyCb, false);
+  else if (ch->canNotify())
+    ch->registerForNotify(trackerNotifyCb, true);
+  uint8_t buf[8];
+  const size_t n = cmdLen > sizeof(buf) ? sizeof(buf) : cmdLen;
+  memcpy(buf, cmd, n);
+  const bool ok = ch->writeValue(buf, n, true);  // write with response
+  LOG_INF("AIRTAG", "%s write ok=%d ind=%d notif=%d", tag, ok, ch->canIndicate(), ch->canNotify());
+  if (!ok) return -1;
+  // Hold the link so the tag has time to sound (disconnecting immediately cuts it).
+  const uint32_t until = millis() + holdMs;
+  while (client->isConnected() && static_cast<int32_t>(until - millis()) > 0) delay(10);
+  return 1;
+}
+}  // namespace
+
+// Anti-stalk: make a nearby separated tracker chirp so it can be found by ear (or stop
+// the chirp). Connects to the tag from the detail view and tries each known protocol
+// newest-first (DULT unwanted-tracker standard, then FMNA Find My accessory, then legacy
+// AirTag), subscribing to the control point and writing the matching start/stop command.
+// No pairing/PIN. Only works while the tag is separated from its owner. Legacy AirTag has
+// no documented stop, so Stop applies to DULT/FMNA only.
+void RadioAuditActivity::playFindMySound(bool stop) {
+  const char* verb = stop ? "Stop sound" : "Play sound";
+  status = std::string(verb) + ": connecting...";
+  requestUpdateAndWait();
+
+  std::vector<std::string> lines;
+  lines.reserve(8);
+  lines.push_back(std::string(verb) + ": " + targetLocAddr);
+
+  bool sent = false;
+  if (ESP.getFreeHeap() < BLE_HEAP_FLOOR_START) {
+    lines.push_back("Low memory - cannot connect.");
+  } else {
+    if (!bleReady) {
+      BLEDevice::init("RadioInk");
+      bleReady = true;
+    }
+    BLEClient* client = BLEDevice::createClient();
+    // Connect with the ADDRESS TYPE observed in the advert (AirTags use random addrs;
+    // hardcoding the type makes the connect silently fail). 15s timeout matches the
+    // reference implementation (tags are slow to connect); a bounded timeout also keeps
+    // a non-connectable/rotated tag from blocking the loop forever (= a frozen device).
+    constexpr uint32_t kConnectTimeoutMs = 15000;
+    LOG_INF("AIRTAG", "connect %s type=%u stop=%d", targetLocAddr.c_str(), targetLocAddrType, stop);
+    if (!client) {
+      lines.push_back("createClient failed.");
+    } else if (!client->connect(BLEAddress(String(targetLocAddr.c_str())), targetLocAddrType, kConnectTimeoutMs)) {
+      lines.push_back("Connect failed (timeout).");
+      lines.push_back("Tag must be SEPARATED from its owner");
+      lines.push_back("and in range. The MAC rotates - re-sweep,");
+      lines.push_back(std::string("then ") + verb + " right away.");
+    } else {
+      // Discover all services once, then try each protocol newest-first.
+      client->getServices();
+      const char* proto = "DULT";
+      int r = tryTrackerSound(client, DULT_SOUND_SERVICE, DULT_SOUND_CHAR, stop ? DULT_SOUND_STOP : DULT_SOUND_START,
+                              stop ? sizeof(DULT_SOUND_STOP) : sizeof(DULT_SOUND_START), 2500, "DULT");
+      if (r == 0) {
+        proto = "FMNA";
+        r = tryTrackerSound(client, FMNA_SOUND_SERVICE, FMNA_SOUND_CHAR, stop ? FMNA_SOUND_STOP : FMNA_SOUND_START,
+                            stop ? sizeof(FMNA_SOUND_STOP) : sizeof(FMNA_SOUND_START), 2500, "FMNA");
+      }
+      // Legacy AirTag: start only (no documented stop command).
+      if (r == 0 && !stop) {
+        proto = "AirTag";
+        r = tryTrackerSound(client, AIRTAG_SOUND_SERVICE, AIRTAG_SOUND_CHAR, AIRTAG_SOUND_START,
+                            sizeof(AIRTAG_SOUND_START), 1500, "AirTag");
+      }
+      if (r == 1) {
+        sent = true;
+        lines.push_back(std::string(stop ? "Sound stopped via " : "Sound sent via ") + proto + ".");
+        lines.push_back(stop ? "The tag should be silent now." : "The tag should be chirping now.");
+      } else if (r == -1) {
+        lines.push_back(std::string(proto) + " write rejected (auth/patched).");
+      } else {
+        lines.push_back(stop ? "Connected, but no stoppable service." : "Connected, but no sound service.");
+        lines.push_back(stop ? "(Legacy AirTags have no stop command.)" : "(No DULT/FMNA/AirTag sound char - the");
+        if (!stop) lines.push_back("tag may not be in separated mode.)");
+      }
+      client->disconnect();
+    }
+    // Note: not deleting the client (BLEDevice owns peer state; deinit cleans up).
+  }
+  shutdownBleController();
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+
+  targetTitle = stop ? "Stop Sound" : "Play Sound";
+  targetLines = std::move(lines);
+  targetScroll = 0;
+  targetLocatable = false;
+  // Play/Stop Sound is only reachable from the tracker list, so Back from this result
+  // returns there (the sound teardown clears the detail's return flags otherwise,
+  // which dropped the user all the way out of the menu).
+  targetFromList = false;
+  targetFromMdnsList = false;
+  targetFromCameraList = true;
   showingTarget = true;
   requestUpdate();
 }
@@ -3873,10 +5745,62 @@ void RadioAuditActivity::deepScanWifiTarget(int index) {
   requestUpdate();
 }
 
+#if defined(RADIO_AUDIT_ENABLE_BLE)
+namespace {
+// Streaming collector for the per-target deep scan. Mirrors StreamingScanCb's
+// erase-as-you-go discipline (each advert is removed from the result map right
+// after it is seen) so NimBLE's map can't grow unbounded -- the old accumulating
+// start()+getDevice() loop bad_alloc'd -> abort()ed here in a dense beacon
+// environment (confirmed via crash_report.txt). Only the target's adverts update
+// the stats; every other advert is still erased to keep peak memory at one device.
+class TargetDeepScanCb : public BLEAdvertisedDeviceCallbacks {
+ public:
+  BLEScan* scan = nullptr;
+  std::string targetAddr;
+
+  int rssiMin = 0, rssiMax = 0, samples = 0;
+  long rssiSum = 0;
+  std::string name, manufacturer, services, serviceDataUuid, serviceDataHex;
+  bool hasTxPower = false;
+  int txPower = 0;
+  int addressType = -1;
+
+  void onResult(BLEAdvertisedDevice dev) override {
+    if (std::string(dev.getAddress().toString().c_str()) == targetAddr) {
+      const int r = dev.getRSSI();
+      rssiSum += r;
+      if (samples == 0) {
+        rssiMin = r;
+        rssiMax = r;
+      } else {
+        rssiMin = std::min(rssiMin, r);
+        rssiMax = std::max(rssiMax, r);
+      }
+      samples++;
+      if (name.empty() && dev.haveName()) name = dev.getName().c_str();
+      if (manufacturer.empty() && dev.haveManufacturerData())
+        manufacturer = hexEncode(dev.getManufacturerData()).c_str();
+      if (services.empty() && dev.haveServiceUUID()) services = dev.getServiceUUID().toString().c_str();
+      if (serviceDataHex.empty() && dev.haveServiceData()) {
+        serviceDataUuid = dev.getServiceDataUUID().toString().c_str();
+        serviceDataHex = hexEncode(dev.getServiceData()).c_str();
+      }
+      if (dev.haveTXPower()) {
+        hasTxPower = true;
+        txPower = dev.getTXPower();
+      }
+      addressType = dev.getAddressType();
+    }
+    if (scan) scan->erase(dev.getAddress());
+  }
+};
+}  // namespace
+#endif
+
 void RadioAuditActivity::deepScanBleTarget(int index) {
   if (index < 0 || index >= static_cast<int>(bleFindings.size())) return;
-  targetTitle = std::string("BLE ") +
-                (bleFindings[index].name.empty() ? bleFindings[index].address : bleFindings[index].name);
+  targetTitle =
+      std::string("BLE ") + (bleFindings[index].name.empty() ? bleFindings[index].address : bleFindings[index].name);
   targetLines.clear();
   targetScroll = 0;
   targetFromList = true;
@@ -3893,11 +5817,16 @@ void RadioAuditActivity::deepScanBleTarget(int index) {
   delay(200);  // let WiFi fully release before the BLE controller starts (C3 is memory-tight)
 
   if (!bleReady) {
+    // Heap headroom going into controller init. Floor is BLE_HEAP_FLOOR_START (50 KB);
+    // init itself eats ~65 KB, so a value near/below the floor predicts an init failure.
+    LOG_INF("RADIO", "BLE deep-dive pre-init free heap: %u (floor %u)", static_cast<unsigned>(ESP.getFreeHeap()),
+            static_cast<unsigned>(BLE_HEAP_FLOOR_START));
     BLEDevice::init("RadioInk");
     bleScan = BLEDevice::getScan();
     bleReady = true;
   }
   if (!bleScan) {  // controller init failed - bail gracefully instead of crashing
+    LOG_ERR("RADIO", "BLE deep-dive init failed, free heap: %u", static_cast<unsigned>(ESP.getFreeHeap()));
     targetLines.push_back("BLE init failed - try again");
     status = "BLE init failed";
     showingTarget = true;
@@ -3912,46 +5841,32 @@ void RadioAuditActivity::deepScanBleTarget(int index) {
   bleScan->setInterval(320);
   bleScan->setWindow(80);
 
-  int rssiMin = 0, rssiMax = 0, samples = 0;
-  long rssiSum = 0;
-  std::string name, manufacturer, services, serviceDataUuid, serviceDataHex;
-  bool hasTxPower = false;
-  int txPower = 0;
-  int addressType = -1;
-
+  // Streaming collection (erase-as-you-go) instead of the old accumulating
+  // start()+getDevice() loop, which let NimBLE's result map grow with every advert
+  // and bad_alloc'd -> abort()ed in a dense beacon environment. `passesSeen` counts
+  // how many of the 3 windows the target appeared in (for the "seen N/3" line);
+  // `samples` counts individual adverts and drives the RSSI average.
+  TargetDeepScanCb cb;
+  cb.scan = bleScan;
+  cb.targetAddr = address;
+  bleScan->setAdvertisedDeviceCallbacks(&cb, /*wantDuplicates=*/false, /*shouldParse=*/true);
+  int passesSeen = 0;
   for (int pass = 0; pass < 3; pass++) {
-    BLEScanResults* results = bleScan->start(2, false);
-    const int count = results ? results->getCount() : 0;
-    for (int i = 0; i < count; i++) {
-      BLEAdvertisedDevice device = results->getDevice(i);
-      if (std::string(device.getAddress().toString().c_str()) != address) continue;
-      const int r = device.getRSSI();
-      rssiSum += r;
-      if (samples == 0) {
-        rssiMin = r;
-        rssiMax = r;
-      } else {
-        rssiMin = std::min(rssiMin, r);
-        rssiMax = std::max(rssiMax, r);
-      }
-      samples++;
-      if (name.empty() && device.haveName()) name = device.getName().c_str();
-      if (manufacturer.empty() && device.haveManufacturerData())
-        manufacturer = hexEncode(device.getManufacturerData()).c_str();
-      if (services.empty() && device.haveServiceUUID()) services = device.getServiceUUID().toString().c_str();
-      if (serviceDataHex.empty() && device.haveServiceData()) {
-        serviceDataUuid = device.getServiceDataUUID().toString().c_str();
-        serviceDataHex = hexEncode(device.getServiceData()).c_str();
-      }
-      if (device.haveTXPower()) {
-        hasTxPower = true;
-        txPower = device.getTXPower();
-      }
-      addressType = device.getAddressType();
-    }
+    const int before = cb.samples;
+    bleScan->start(2, false);
     bleScan->clearResults();
+    if (cb.samples > before) passesSeen++;
   }
+  bleScan->setAdvertisedDeviceCallbacks(nullptr);
   shutdownBleController();
+
+  const int rssiMin = cb.rssiMin, rssiMax = cb.rssiMax, samples = cb.samples;
+  const long rssiSum = cb.rssiSum;
+  std::string name = std::move(cb.name), manufacturer = std::move(cb.manufacturer), services = std::move(cb.services);
+  std::string serviceDataUuid = std::move(cb.serviceDataUuid), serviceDataHex = std::move(cb.serviceDataHex);
+  const bool hasTxPower = cb.hasTxPower;
+  const int txPower = cb.txPower;
+  const int addressType = cb.addressType;
 
   if (name.empty()) name = bleFindings[index].name;
   if (manufacturer.empty()) manufacturer = bleFindings[index].manufacturerHex;
@@ -3966,14 +5881,17 @@ void RadioAuditActivity::deepScanBleTarget(int index) {
   targetLines.push_back("Time: " + timeStamp());
   targetLines.push_back(address);
   targetLines.push_back("Name: " + (name.empty() ? std::string("<unnamed>") : name));
-  if (!advType.empty()) targetLines.push_back("Type: " + advType);
+  if (!advType.empty()) {
+    targetLines.push_back("Type: " + advType);
+    appendBeaconDetail(targetLines, advType, manufacturer, serviceDataHex);
+  }
   targetLines.push_back("Vendor: " + bleVendorName(manufacturer));
   if (!randomAddress) {
     const std::string macVend = macVendor(address);
     if (!macVend.empty() && macVend != "randomized") targetLines.push_back("MAC vendor: " + macVend);
   }
   targetLines.push_back("RSSI avg " + std::to_string(avg) + " (" + std::to_string(lo) + "/" + std::to_string(hi) +
-                        ")  seen " + std::to_string(samples) + "/3");
+                        ")  seen " + std::to_string(passesSeen) + "/3");
   if (hasTxPower) targetLines.push_back("TX power: " + std::to_string(txPower));
   if (!services.empty()) {
     const std::string svcName = bleServiceName(services);
@@ -4176,8 +6094,8 @@ void RadioAuditActivity::stopPcapCapture() {
 
   scanTime = timeStamp();
   state = State::SAVED;
-  status = std::string("Saved ") + std::to_string(g_pcap.packets) + " pkts (" + std::to_string(g_pcap.drops) +
-           " dropped)";
+  status =
+      std::string("Saved ") + std::to_string(g_pcap.packets) + " pkts (" + std::to_string(g_pcap.drops) + " dropped)";
 
   // Show a result page (mirrors the probe-scan summary view).
   targetTitle = "PCAP capture saved";
@@ -4350,9 +6268,8 @@ void RadioAuditActivity::renderHandshake() {
   y += renderer.getLineHeight(SMALL_FONT_ID) + 6;
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
   HsSsidEntry* tgt = hsBestAp();
-  const std::string tgtLine =
-      tgt ? (std::string("Deauth target: ") + tgt->ssid + " CH" + std::to_string(tgt->channel))
-          : std::string("Deauth target: (waiting for beacon)");
+  const std::string tgtLine = tgt ? (std::string("Deauth target: ") + tgt->ssid + " CH" + std::to_string(tgt->channel))
+                                  : std::string("Deauth target: (waiting for beacon)");
   renderer.drawText(SMALL_FONT_ID, summaryX, y,
                     renderer.truncatedText(SMALL_FONT_ID, tgtLine.c_str(), pageWidth - summaryX * 2).c_str());
   y += renderer.getLineHeight(SMALL_FONT_ID) + 6;
@@ -4393,8 +6310,7 @@ void RadioAuditActivity::startDeauthDetect() {
     return;
   }
 
-  const std::string hdr =
-      "# Radio Ink deauth/disassoc flood detector\n# src,bssid,deauth,disassoc,channel,rssi\n";
+  const std::string hdr = "# Radio Ink deauth/disassoc flood detector\n# src,bssid,deauth,disassoc,channel,rssi\n";
   captureFile.write(reinterpret_cast<const uint8_t*>(hdr.data()), hdr.size());
 
   status = "Watching for deauth floods...";
@@ -4426,9 +6342,9 @@ void RadioAuditActivity::processDeauthDetect() {
     if (!s.used || s.reported) continue;
     const uint16_t total = static_cast<uint16_t>(s.deauthCount + s.disassocCount);
     if (total < DD_ALERT_THRESHOLD) continue;
-    const std::string line = macToString(s.src) + "," + macToString(s.bssid) + "," +
-                             std::to_string(s.deauthCount) + "," + std::to_string(s.disassocCount) + "," +
-                             std::to_string(s.lastChannel) + "," + std::to_string(s.lastRssi) + "\n";
+    const std::string line = macToString(s.src) + "," + macToString(s.bssid) + "," + std::to_string(s.deauthCount) +
+                             "," + std::to_string(s.disassocCount) + "," + std::to_string(s.lastChannel) + "," +
+                             std::to_string(s.lastRssi) + "\n";
     captureFile.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
     s.reported = true;
     ddAlertCount++;
@@ -4457,8 +6373,8 @@ void RadioAuditActivity::stopDeauthDetect() {
     const uint16_t total = static_cast<uint16_t>(s.deauthCount + s.disassocCount);
     if (total == 0) continue;
     if (listed++ >= 8) break;
-    targetLines.push_back((s.reported ? "[FLOOD] " : "") + macToString(s.src) + " x" + std::to_string(total) +
-                          " CH" + std::to_string(s.lastChannel) + " " + std::to_string(s.lastRssi) + "dBm");
+    targetLines.push_back((s.reported ? "[FLOOD] " : "") + macToString(s.src) + " x" + std::to_string(total) + " CH" +
+                          std::to_string(s.lastChannel) + " " + std::to_string(s.lastRssi) + "dBm");
   }
   if (listed == 0) targetLines.push_back("No deauth/disassoc frames seen.");
   targetLines.push_back("Log: " + capturePath);
@@ -4581,8 +6497,8 @@ void RadioAuditActivity::stopDroneScan() {
     for (const auto& d : g_drone->slots) {
       if (!d.used) continue;
       found++;
-      targetLines.push_back(std::string(d.haveId && d.id[0] ? d.id : "(no ID)") + "  " +
-                            std::to_string(d.rssi) + " dBm");
+      targetLines.push_back(std::string(d.haveId && d.id[0] ? d.id : "(no ID)") + "  " + std::to_string(d.rssi) +
+                            " dBm");
       char ua[40];
       snprintf(ua, sizeof(ua), "  UA type %u  CH%u  %s", d.uaType, d.channel, macToString(d.mac).c_str());
       targetLines.push_back(ua);
@@ -4677,6 +6593,12 @@ void RadioAuditActivity::openTargetMenu() {
     if (targetLocatable) targetMenuCodes.push_back(2);  // locate
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
     if (!targetLocBle) targetMenuCodes.push_back(5);  // deauth (client = directed, AP = broadcast)
+#if defined(RADIO_AUDIT_ENABLE_BLE)
+    if (targetIsFindMy) {
+      targetMenuCodes.push_back(6);  // play sound (separated Find My / AirTag)
+      targetMenuCodes.push_back(7);  // stop sound (DULT/FMNA)
+    }
+#endif
 #endif
     targetMenuCodes.push_back(3);  // close
     targetMenuSel = 0;
@@ -4689,8 +6611,7 @@ void RadioAuditActivity::openTargetMenu() {
     targetMenuCodes.push_back(4);  // GATT enumerate
 #endif
   } else {
-    const bool wifiAp =
-        lastDeepScanWifiIndex >= 0 && lastDeepScanWifiIndex < static_cast<int>(wifiFindings.size());
+    const bool wifiAp = lastDeepScanWifiIndex >= 0 && lastDeepScanWifiIndex < static_cast<int>(wifiFindings.size());
     if (wifiAp) {
       targetMenuCodes.push_back(0);  // mark / unmark for deauth
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
@@ -4712,11 +6633,20 @@ std::string RadioAuditActivity::targetMenuLabel(int code) const {
                           wifiFindings[lastDeepScanWifiIndex].marked;
       return marked ? "Unmark target" : "Mark for deauth";
     }
-    case 1: return "Deauth this AP";
-    case 2: return "Locate (find it)";
-    case 3: return "Close";
-    case 4: return "GATT enumerate";
-    case 5: return targetCamHasAp ? "Deauth camera" : "Deauth this AP";
+    case 1:
+      return "Deauth this AP";
+    case 2:
+      return "Locate (find it)";
+    case 3:
+      return "Close";
+    case 4:
+      return "GATT enumerate";
+    case 5:
+      return targetCamHasAp ? "Deauth camera" : "Deauth this AP";
+    case 6:
+      return "Play Sound (find it)";
+    case 7:
+      return "Stop Sound";
   }
   return "";
 }
@@ -4755,6 +6685,20 @@ void RadioAuditActivity::runTargetMenuItem(int code) {
       startCameraDeauth();
 #endif
       return;
+    case 6:
+#if defined(RADIO_AUDIT_ENABLE_ACTIVE) && defined(RADIO_AUDIT_ENABLE_BLE)
+      if (!requireAuthorization()) return;  // one-time on-device confirm; detail view stays put
+      targetMenuOpen = false;
+      playFindMySound(/*stop=*/false);
+#endif
+      return;
+    case 7:
+#if defined(RADIO_AUDIT_ENABLE_ACTIVE) && defined(RADIO_AUDIT_ENABLE_BLE)
+      if (!requireAuthorization()) return;
+      targetMenuOpen = false;
+      playFindMySound(/*stop=*/true);
+#endif
+      return;
     case 3:
     default:
       targetMenuOpen = false;
@@ -4774,8 +6718,9 @@ void RadioAuditActivity::renderTargetMenu() {
                  "Actions");
   const int n = static_cast<int>(targetMenuCodes.size());
   const int listHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  GUI.drawList(renderer, Rect{0, contentTop, pageWidth, listHeight}, n, targetMenuSel,
-               [this](int index) { return targetMenuLabel(targetMenuCodes[index]); }, nullptr, nullptr);
+  GUI.drawList(
+      renderer, Rect{0, contentTop, pageWidth, listHeight}, n, targetMenuSel,
+      [this](int index) { return targetMenuLabel(targetMenuCodes[index]); }, nullptr, nullptr);
 
   const auto labels = mappedInput.mapLabels("Back", "Select", "Up", "Down");
   UITheme::getInstance().suppressBrandLogoOnce();  // menu view: no brand logo
@@ -4790,10 +6735,10 @@ bool RadioAuditActivity::requireAuthorization() {
     if (!res.isCancelled) g_activeAuthorized = true;  // confirmed for the rest of the session
     requestUpdate();
   };
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
-                                                                std::string("Authorized testing only"),
-                                                                std::string("Transmit attack frames?")),
-                         handler);
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, std::string("Authorized testing only"),
+                                             std::string("Transmit attack frames?")),
+      handler);
   return false;  // caller aborts; user repeats the action once authorized
 }
 
@@ -4868,8 +6813,7 @@ void RadioAuditActivity::startDeauthCameras() {
   for (int i = 0; i < static_cast<int>(wifiFindings.size()); i++) {
     const auto& w = wifiFindings[i];
     const std::string vendor = macVendor(w.bssid);
-    if (!cameraFingerprintReason(w.ssid, vendor).empty() || !cameraMacReason(w.bssid).empty())
-      cams.push_back(i);
+    if (!cameraFingerprintReason(w.ssid, vendor).empty() || !cameraMacReason(w.bssid).empty()) cams.push_back(i);
   }
   if (cams.empty()) {
     status = "No cameras found - run a WiFi/Camera scan first";
@@ -5032,7 +6976,7 @@ void RadioAuditActivity::renderAttack() {
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int summaryX = metrics.contentSidePadding;
 
-  const char* title = attackMode == AttackMode::Deauth       ? "Deauth Attack"
+  const char* title = attackMode == AttackMode::Deauth         ? "Deauth Attack"
                       : attackMode == AttackMode::Beacon       ? "Beacon Flood"
                       : attackMode == AttackMode::Karma        ? "Karma / Probe Resp"
                       : attackMode == AttackMode::CameraDeauth ? "Deauth Camera"
@@ -5052,17 +6996,17 @@ void RadioAuditActivity::renderAttack() {
   } else if (attackMode == AttackMode::Karma) {
     const int pnl = g_karma ? g_karma->count : 0;
     const unsigned reqs = g_karma ? g_karma->probeReqs : 0;
-    renderer.drawText(SMALL_FONT_ID, summaryX, y,
-                      (String("PNL: ") + pnl + " SSIDs   Probes: " + reqs).c_str());
+    renderer.drawText(SMALL_FONT_ID, summaryX, y, (String("PNL: ") + pnl + " SSIDs   Probes: " + reqs).c_str());
     y += renderer.getLineHeight(SMALL_FONT_ID) + 6;
   }
   renderer.drawText(UI_12_FONT_ID, summaryX, y,
-                    renderer.truncatedText(UI_12_FONT_ID, (String("Target: ") + attackStatusLine.c_str()).c_str(),
-                                           pageWidth - summaryX * 2)
+                    renderer
+                        .truncatedText(UI_12_FONT_ID, (String("Target: ") + attackStatusLine.c_str()).c_str(),
+                                       pageWidth - summaryX * 2)
                         .c_str(),
                     true, EpdFontFamily::BOLD);
   y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
-  const char* blurb = attackMode == AttackMode::Deauth       ? "Kicking all clients off targeted APs."
+  const char* blurb = attackMode == AttackMode::Deauth         ? "Kicking all clients off targeted APs."
                       : attackMode == AttackMode::Beacon       ? "Spamming fake beacons across channels."
                       : attackMode == AttackMode::Karma        ? "Beaconing the SSIDs clients probe for."
                       : attackMode == AttackMode::CameraDeauth ? "Knocking the camera off its network."
@@ -5075,7 +7019,6 @@ void RadioAuditActivity::renderAttack() {
   renderer.displayBuffer();
 }
 #endif  // RADIO_AUDIT_ENABLE_ACTIVE
-
 
 void RadioAuditActivity::showChannelUsage() {
   if (wifiFindings.empty()) {
@@ -5105,10 +7048,15 @@ void RadioAuditActivity::showChannelUsage() {
     if (counts[ch] == 0) continue;
     int bars = counts[ch] * 12 / maxCount;
     if (bars < 1) bars = 1;
+    // Co-channel/adjacent-channel congestion: 2.4GHz channels within +/-4 overlap
+    // significantly, so this counts everything nearby, not just this channel.
+    int nearby = 0;
+    for (int k = std::max(1, ch - 4); k <= std::min(14, ch + 4); k++) nearby += counts[k];
+    const char* congestion = nearby >= 8 ? "Congested" : nearby >= 4 ? "Busy" : "Clear";
     char head[8];
     snprintf(head, sizeof(head), "CH%-2d ", ch);
     targetLines.push_back(std::string(head) + std::string(bars, '#') + " " + std::to_string(counts[ch]) + " (" +
-                          std::to_string(strongest[ch]) + "dBm)");
+                          std::to_string(strongest[ch]) + "dBm)  " + congestion);
   }
   status = "Channel usage";
   showingTarget = true;
@@ -5136,8 +7084,7 @@ void RadioAuditActivity::loadWatchlist() {
 void RadioAuditActivity::diffAndSaveSnapshot() {
   // Current device keys + human labels.
   std::vector<std::pair<std::string, std::string>> current;
-  for (const auto& w : wifiFindings)
-    current.emplace_back("W|" + upperStr(w.bssid), w.ssid.empty() ? w.bssid : w.ssid);
+  for (const auto& w : wifiFindings) current.emplace_back("W|" + upperStr(w.bssid), w.ssid.empty() ? w.bssid : w.ssid);
   for (const auto& b : bleFindings)
     current.emplace_back("B|" + upperStr(b.address), b.name.empty() ? b.address : b.name);
 
@@ -5166,7 +7113,8 @@ void RadioAuditActivity::diffAndSaveSnapshot() {
     for (const auto& cur : current)
       if (!contains(previous, cur.first)) addAuditFinding("INFO", "New since last scan", cur.second + " appeared.");
     for (const auto& prev : previous)
-      if (!contains(current, prev.first)) addAuditFinding("INFO", "Gone since last scan", prev.second + " disappeared.");
+      if (!contains(current, prev.first))
+        addAuditFinding("INFO", "Gone since last scan", prev.second + " disappeared.");
   }
 
   String out;
@@ -5299,8 +7247,10 @@ void RadioAuditActivity::renderLocator() {
     y += renderer.getLineHeight(SMALL_FONT_ID) + 8;
     const char* trend = "= holding";
     if (locPrevRssi > -127) {
-      if (locCurRssi - locPrevRssi >= 2) trend = "^^ WARMER (closer)";
-      else if (locPrevRssi - locCurRssi >= 2) trend = "vv colder (farther)";
+      if (locCurRssi - locPrevRssi >= 2)
+        trend = "^^ WARMER (closer)";
+      else if (locPrevRssi - locCurRssi >= 2)
+        trend = "vv colder (farther)";
     }
     renderer.drawText(UI_12_FONT_ID, summaryX, y, trend, true, EpdFontFamily::BOLD);
   }
@@ -5342,18 +7292,16 @@ String RadioAuditActivity::makeTextReport() const {
   for (size_t i = 0; i < wifiFindings.size(); i++) {
     const auto& w = wifiFindings[i];
     out += String(i + 1) + ". " + (w.ssid.empty() ? "<hidden>" : w.ssid.c_str()) + "\n";
-    out += String("   ") + w.bssid.c_str() + " CH" + w.channel + " seen " + w.seenCount + "/" + scanTotalPasses +
-           "\n";
-    out += String("   avg ") + w.rssi + " dBm min " + w.rssiMin + " max " + w.rssiMax + " " + w.auth.c_str() +
-           "\n";
+    out += String("   ") + w.bssid.c_str() + " CH" + w.channel + " seen " + w.seenCount + "/" + scanTotalPasses + "\n";
+    out += String("   avg ") + w.rssi + " dBm min " + w.rssiMin + " max " + w.rssiMax + " " + w.auth.c_str() + "\n";
   }
   out += "\nBLE\n---\n";
   for (size_t i = 0; i < bleFindings.size(); i++) {
     const auto& b = bleFindings[i];
     out += String(i + 1) + ". " + b.address.c_str() + "\n";
     out += String("   ") + (b.name.empty() ? "<unnamed>" : b.name.c_str()) + "\n";
-    out += String("   avg ") + b.rssi + " dBm min " + b.rssiMin + " max " + b.rssiMax + " seen " + b.seenCount +
-           "/" + scanTotalPasses;
+    out += String("   avg ") + b.rssi + " dBm min " + b.rssiMin + " max " + b.rssiMax + " seen " + b.seenCount + "/" +
+           scanTotalPasses;
     if (b.hasTxPower) out += String(" TX ") + b.txPower;
     out += "\n";
   }
@@ -5551,8 +7499,9 @@ String RadioAuditActivity::makeWigleReport() const {
   String out =
       "WigleWifi-1.4,appRelease=1.0.0,model=Xteink X4,release=1.0.0,device=Radio Ink,display=eink,board=esp32c3,"
       "brand=Radio Ink\n";
-  out += "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,"
-         "AccuracyMeters,Type\n";
+  out +=
+      "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,"
+      "AccuracyMeters,Type\n";
 
   for (const auto& w : wifiFindings) {
     out += String(w.bssid.c_str()) + "," + csvEscape(w.ssid) + "," + wigleAuth(w.auth).c_str() + "," + when + ",";
@@ -5632,6 +7581,18 @@ std::string RadioAuditActivity::authName(wifi_auth_mode_t auth) {
       return "WPA3";
     case WIFI_AUTH_WPA2_WPA3_PSK:
       return "WPA2/WPA3";
+    case WIFI_AUTH_WAPI_PSK:
+      return "WAPI";
+    case WIFI_AUTH_OWE:
+      return "OWE";
+    case WIFI_AUTH_WPA3_ENT_192:
+      return "WPA3-EAP-192";
+    case WIFI_AUTH_WPA3_ENTERPRISE:
+      return "WPA3-EAP";
+    case WIFI_AUTH_WPA2_WPA3_ENTERPRISE:
+      return "WPA2/WPA3-EAP";
+    case WIFI_AUTH_WPA_ENTERPRISE:
+      return "WPA-EAP";
     default:
       return "UNKNOWN";
   }
@@ -5699,10 +7660,14 @@ void RadioAuditActivity::render(RenderLock&&) {
   }
 
   if (state == State::CAPTURING) {
-    if (captureMode == CaptureMode::Pcap) renderCapture();
-    else if (captureMode == CaptureMode::DeauthDetect) renderDeauthDetect();
-    else if (captureMode == CaptureMode::DroneScan) renderDroneScan();
-    else renderHandshake();
+    if (captureMode == CaptureMode::Pcap)
+      renderCapture();
+    else if (captureMode == CaptureMode::DeauthDetect)
+      renderDeauthDetect();
+    else if (captureMode == CaptureMode::DroneScan)
+      renderDroneScan();
+    else
+      renderHandshake();
     return;
   }
 
@@ -5733,6 +7698,11 @@ void RadioAuditActivity::render(RenderLock&&) {
   }
 #endif
 
+  if (showingMdnsList) {
+    renderMdnsList();
+    return;
+  }
+
   if (showingCameraList) {
     renderCameraList();
     return;
@@ -5744,8 +7714,8 @@ void RadioAuditActivity::render(RenderLock&&) {
       return;
     }
     const int itemCount = static_cast<int>(targetLines.size());
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                   targetTitle.c_str(), status.c_str());
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, targetTitle.c_str(),
+                   status.c_str());
 
     if (itemCount == 0) {
       const auto height = renderer.getLineHeight(UI_10_FONT_ID);
@@ -5816,8 +7786,8 @@ void RadioAuditActivity::render(RenderLock&&) {
               return out;
             }
             const auto& w = wifiFindings[index];
-            std::string out = w.bssid + "  " + std::to_string(w.rssi) + " dBm  CH" + std::to_string(w.channel) +
-                              "  " + w.auth;
+            std::string out =
+                w.bssid + "  " + std::to_string(w.rssi) + " dBm  CH" + std::to_string(w.channel) + "  " + w.auth;
             if (w.seenCount > 1 || deepScanMode) {
               out += "  seen " + std::to_string(w.seenCount) + "/" + std::to_string(scanTotalPasses);
             }
@@ -5850,11 +7820,11 @@ void RadioAuditActivity::render(RenderLock&&) {
 
   int y = contentTop;
   // Sub-header counts strip.
-  renderer.drawText(UI_12_FONT_ID, summaryX, y,
-                    (String("APs ") + wifiFindings.size() + "   BLE " + bleFindings.size() + "   Probes " +
-                     probeFindings.size())
-                        .c_str(),
-                    true, EpdFontFamily::BOLD);
+  renderer.drawText(
+      UI_12_FONT_ID, summaryX, y,
+      (String("APs ") + wifiFindings.size() + "   BLE " + bleFindings.size() + "   Probes " + probeFindings.size())
+          .c_str(),
+      true, EpdFontFamily::BOLD);
   y += renderer.getLineHeight(UI_12_FONT_ID) + 8;
   renderer.drawText(SMALL_FONT_ID, summaryX, y,
                     (String("Mode: ") + (deepScanMode ? "Deep" : "Quick") + "  Passes: " + scanTotalPasses).c_str());
@@ -5887,15 +7857,17 @@ void RadioAuditActivity::render(RenderLock&&) {
   const Rect listRect{0, listTop, listWidth, listHeight};
   if (currentCategory < 0) {
     // Top-level category list.
-    GUI.drawList(renderer, listRect, CATEGORY_COUNT, selectedCategory,
-                 [](int index) { return std::string(ACTION_CATEGORIES[index].name); }, nullptr,
-                 [](int index) { return ACTION_CATEGORIES[index].icon; });
+    GUI.drawList(
+        renderer, listRect, CATEGORY_COUNT, selectedCategory,
+        [](int index) { return std::string(ACTION_CATEGORIES[index].name); }, nullptr,
+        [](int index) { return ACTION_CATEGORIES[index].icon; });
   } else {
     // Items within the selected category.
     const ActionCategory& cat = ACTION_CATEGORIES[currentCategory];
-    GUI.drawList(renderer, listRect, cat.count, selectedItem,
-                 [&cat](int index) { return std::string(actionLabel(cat.items[index])); }, nullptr,
-                 [&cat](int index) { return actionIcon(cat.items[index]); });
+    GUI.drawList(
+        renderer, listRect, cat.count, selectedItem,
+        [&cat](int index) { return std::string(actionLabel(cat.items[index])); }, nullptr,
+        [&cat](int index) { return actionIcon(cat.items[index]); });
   }
 
   // The list reserves a right gutter (listWidth) for the skull mark, which the

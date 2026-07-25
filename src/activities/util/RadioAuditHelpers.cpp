@@ -1,10 +1,12 @@
 #include "RadioAuditHelpers.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "BleServiceUuids.h"  // flash-resident SIG GATT service-UUID name table
 
@@ -115,6 +117,21 @@ std::string upperStr(std::string s) {
 std::string lowerStr(std::string s) {
   for (auto& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
   return s;
+}
+
+int levenshteinDistance(const std::string& a, const std::string& b) {
+  const size_t n = a.size(), m = b.size();
+  std::vector<int> prev(m + 1), cur(m + 1);
+  for (size_t j = 0; j <= m; j++) prev[j] = static_cast<int>(j);
+  for (size_t i = 1; i <= n; i++) {
+    cur[0] = static_cast<int>(i);
+    for (size_t j = 1; j <= m; j++) {
+      const int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+      cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost});
+    }
+    std::swap(prev, cur);
+  }
+  return prev[m];
 }
 
 std::string cameraFingerprintReason(const std::string& label, const std::string& vendor) {

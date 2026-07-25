@@ -45,6 +45,8 @@ class HomeActivity final : public Activity {
     ++i;
     if (item == HomeMenuItem::MOVIES) return i;
     ++i;
+    if (item == HomeMenuItem::TOOLS) return i;
+    ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     ++i;
     if (item == HomeMenuItem::ABOUT) return i;
@@ -60,6 +62,7 @@ class HomeActivity final : public Activity {
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i++) return HomeMenuItem::RADIO_AUDIT;
     if (idx == i++) return HomeMenuItem::MOVIES;
+    if (idx == i++) return HomeMenuItem::TOOLS;
     if (idx == i++) return HomeMenuItem::SETTINGS_MENU;
     if (idx == i) return HomeMenuItem::ABOUT;
     return HomeMenuItem::NONE;
@@ -71,6 +74,7 @@ class HomeActivity final : public Activity {
   void onFileTransferOpen();
   void onRadioAuditOpen();
   void onMoviesOpen();
+  void onToolsOpen();
   void onAboutOpen();
   void onOpdsBrowserOpen();
 

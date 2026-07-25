@@ -37,3 +37,8 @@ data/ble/ble_companies.bin
 # Generated sample/converted movies (build with scripts/gen_video.py)
 data/movies/*.rivid
 /ignore
+
+# Generated SD-card dictionary files (regenerate with scripts/gcide_to_tsv.py
+# and scripts/split_dictionary.py)
+/dictionary.tsv
+/dictionary/

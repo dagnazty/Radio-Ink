@@ -1,9 +1,60 @@
 #include "Logging.h"
 
+#include <Arduino.h>
+
+#include <cstring>
 #include <string>
 
 #define MAX_ENTRY_LEN 256
 #define MAX_LOG_LINES 16
+
+// --- SD-log staging ----------------------------------------------------------
+// A small fixed ring of formatted lines that logPrintf() stages and the main
+// loop drains to SD (see Logging.h). Kept tiny: errors are infrequent and the
+// drain runs often, so this only has to bridge one loop iteration's worth.
+#define SD_STAGE_LINES 24
+static char sdStage[SD_STAGE_LINES][MAX_ENTRY_LEN];
+static uint16_t sdStageHead = 0;   // next slot to write
+static uint16_t sdStageCount = 0;  // staged-but-undrained
+static uint8_t sdLogLevel = 0;     // 0=off, 1=ERR, 2=+INF, 3=+DBG
+static portMUX_TYPE sdStageMux = portMUX_INITIALIZER_UNLOCKED;
+
+void setSdLogLevel(uint8_t level) { sdLogLevel = level; }
+
+// Map the level tag to a severity: ERR=1, INF=2, DBG=3 (unknown treated as ERR).
+static uint8_t levelSeverity(const char* level) {
+  if (level[0] == 'I') return 2;
+  if (level[0] == 'D') return 3;
+  return 1;
+}
+
+static void stageForSd(const char* line, uint8_t severity) {
+  if (sdLogLevel == 0 || severity > sdLogLevel) return;
+  portENTER_CRITICAL(&sdStageMux);
+  strncpy(sdStage[sdStageHead], line, MAX_ENTRY_LEN - 1);
+  sdStage[sdStageHead][MAX_ENTRY_LEN - 1] = '\0';
+  sdStageHead = (sdStageHead + 1) % SD_STAGE_LINES;
+  if (sdStageCount < SD_STAGE_LINES)
+    sdStageCount++;  // full ring: oldest staged line is overwritten (dropped)
+  portEXIT_CRITICAL(&sdStageMux);
+}
+
+void drainSdLogs(void (*sink)(const char* line)) {
+  if (sink == nullptr) return;
+  while (true) {
+    char local[MAX_ENTRY_LEN];
+    portENTER_CRITICAL(&sdStageMux);
+    if (sdStageCount == 0) {
+      portEXIT_CRITICAL(&sdStageMux);
+      return;
+    }
+    const uint16_t tail = (sdStageHead + SD_STAGE_LINES - sdStageCount) % SD_STAGE_LINES;
+    memcpy(local, sdStage[tail], MAX_ENTRY_LEN);
+    sdStageCount--;
+    portEXIT_CRITICAL(&sdStageMux);
+    sink(local);  // SD I/O happens outside the critical section
+  }
+}
 
 // Simple ring buffer log, useful for error reporting when we encounter a crash
 RTC_NOINIT_ATTR char logMessages[MAX_LOG_LINES][MAX_ENTRY_LEN];
@@ -63,6 +114,7 @@ void logPrintf(const char* level, const char* origin, const char* format, ...) {
     logSerial.print(buf);
   }
   addToLogRingBuffer(buf);
+  stageForSd(buf, levelSeverity(level));
 }
 
 std::string getLastLogs() {

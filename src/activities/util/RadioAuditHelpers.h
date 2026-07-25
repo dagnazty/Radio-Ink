@@ -31,6 +31,10 @@ std::string bleServiceName(const std::string& uuid);
 std::string upperStr(std::string s);
 std::string lowerStr(std::string s);
 
+// Edit distance between two short strings (SSIDs are <=32 bytes, so the O(n*m)
+// DP table is trivial). Used to flag look-alike SSIDs (evil-twin typosquats).
+int levenshteinDistance(const std::string& a, const std::string& b);
+
 // Camera/IoT fingerprints from an SSID/name + vendor string.
 std::string cameraFingerprintReason(const std::string& label, const std::string& vendor);
 // Camera likelihood from a MAC/BLE vendor name (Amazon=Ring/Blink, IP-cam makers).

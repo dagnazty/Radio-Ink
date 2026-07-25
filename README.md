@@ -34,7 +34,28 @@ Created and maintained by **dag nazty** — <https://dagnazty.dev>. Fork at
 Reachable from **Home → Radio Ink**, grouped into menu categories:
 
 - **Scan** — Quick / Deep Wi-Fi + BLE scans, **client recon** (probe-request harvesting), and a
-  **channel-usage** map.
+  **channel-usage** map with a per-channel Clear/Busy/Congested rating (overlap-aware, not just a flat AP
+  count).
+- **Network** — LAN-layer recon once you've joined a Wi-Fi network:
+  - **mDNS Browser** — enumerates Bonjour/mDNS service types (HTTP/HTTPS, IPP printers, AirPlay, Chromecast,
+    RTSP cameras, SSH, SMB, workstations, HomeKit) and lists every responder. Open one to see its hostname,
+    IP:port, and all advertised **TXT records** (model / firmware / paths) — passive, straight from the
+    query response.
+  - **LAN Scanner** — ARP-sweeps the local `/24` and lists every live host with its IP, MAC, and vendor
+    (gateway flagged), sweeping in watchdog-safe batches. Also flags an **ARP-spoof / MITM** signature: any
+    MAC answering for more than one IP in the same sweep (especially the gateway).
+  - **NTP Time Sync** — sets the DS3231 RTC from an internet time server so captures/reports are stamped
+    with the real date/time (also available in Settings → Clock Sync).
+  - **Network Info** — SSID / IP / gateway / subnet / DNS / MAC / RSSI / channel, plus ICMP **pings** of the
+    gateway and 8.8.8.8 (reachability + latency).
+  - **Port Probe** — TCP-scans a curated set of common ports on a target IP and lists what's open, with an
+    **HTTP banner grab** (`Server:` header + page `<title>`) for fingerprinting web UIs.
+  - **Subnet Calculator** — IP/CIDR → network / broadcast / netmask / host range, pure offline math.
+  - **Traceroute** — TTL-incrementing ping trace to a target IP.
+  - **Rogue DHCP Probe** — broadcasts a DHCPDISCOVER and flags it if more than one distinct server offers a
+    lease — the classic rogue-DHCP-server tell.
+  - **SNMP Sweep** — tries default community strings (public/private/community/admin/manager/cisco) against
+    a target's UDP 161 and reports which are accepted, with a best-effort `sysDescr` readout.
 - **Detect** — passive threat / signature monitors:
   - **Guardian Mode** — set-and-forget watch that unifies the detectors below (BLE pairing spam, Flipper,
     drones, item-trackers / watchlisted MACs that follow you, and Wi-Fi deauth floods) into one **ALL
@@ -47,7 +68,10 @@ Reachable from **Home → Radio Ink**, grouped into menu categories:
   - **Camera Sweep** *(interactive)* — Wi-Fi/BLE + associated-client OUI fingerprinting for IP cameras,
     **Ring / Blink** (hardcoded OUIs, plus randomized-MAC candidates), doorbells and NVRs — select a hit to
     **Locate** or **Deauth** it.
-  - **Tracker Sweep** — AirTag / FindMy / Tile / Samsung SmartTag / Chipolo tags.
+  - **Tracker Sweep** — AirTag / FindMy / Tile / Samsung SmartTag / Chipolo tags, as a selectable list.
+    Pick a tag to **Locate** it (RSSI hot/cold) or **Play Sound** — connect to a *separated* Find My tag and
+    make it chirp so you can find a tracker planted on you (DULT / FMNA / legacy-AirTag protocols;
+    authorization-gated; based on ESP32Marauder — see credits).
   - **Anti-Stalk Watch** — re-scans BLE on an interval and flags a tracker or watchlisted device that keeps
     following you across passes.
   - **Drone RID Scan** — decodes **OpenDroneID / ASTM F3411** Remote ID from Wi-Fi beacons (drone serial, UA
@@ -61,14 +85,20 @@ Reachable from **Home → Radio Ink**, grouped into menu categories:
   directed deauth of a selected camera), **beacon flood**, **evil-twin captive portal** with credential
   capture, **Karma / probe-response**, and **BLE advertisement spoof**.
 - **Results** — audit findings (open / WEP / legacy-WPA / hidden / **WPS** / **evil-twin** — one SSID on
-  multiple BSSIDs with mixed encryption / rogue-AP / deauth activity, plus every Threat Sweep signature:
+  multiple BSSIDs with mixed encryption / rogue-AP / deauth activity / **enterprise (802.1X)** networks /
+  **SSID look-alike** typosquats / **KARMA signature** (a BSSID that changes its advertised SSID across scan
+  passes) / **ARP-spoof** hits / congested-channel neighborhoods, plus every Threat Sweep signature:
   Flipper / Pwnagotchi / skimmer / Meshtastic / BLE relay / BLE spam / drone / Axon) and the Wi-Fi / BLE
-  result lists. Also **View Reports** (read saved reports/captures on-device) and **Share Findings (web)** —
-  the device hosts a WPA2 SoftAP + captive portal; scan the Wi-Fi-join QR on a phone and the findings open
-  like a web page (fully offline; the device auto-reboots on exit to free memory for scanning).
+  result lists. Also **WPS Audit** (filtered list of WPS-advertising APs), **System Stats** (heap / CPU /
+  temperature / uptime / MAC field diagnostics), **I2C Scan** (probes the I2C bus, labels known chips),
+  **View Reports** (read saved reports/captures on-device) and **Share Findings (web)** — the device hosts a
+  WPA2 SoftAP + captive portal; scan the Wi-Fi-join QR on a phone and the findings open like a web page
+  (fully offline; the device auto-reboots on exit to free memory for scanning).
 - **Export** — TXT / CSV / JSON reports plus **WiGLE-1.4 CSV** for wardriving, all RTC-stamped to SD.
   (No on-board GPS: drop a `location.txt` with `lat,lon` on the SD to tag WiGLE rows.)
-- Plus, from any deep-scan detail: **GATT enumerate**, an **RSSI locator** ("warmer/colder"), vendor
+- Plus, from any deep-scan detail: **GATT enumerate** (now with a bounded read attempt per characteristic,
+  flagging whether data came back with no pairing/PIN prompt), a structured **iBeacon/Eddystone breakdown**
+  (UUID/major/minor, TX power, URL or namespace/instance), an **RSSI locator** ("warmer/colder"), vendor
   lookup, BLE-advert decoding, a MAC **watchlist**, and **scan-to-scan diff** (NEW / GONE devices).
 
 **Vendor databases (SD):** two lookup tables live on the SD card (kept off flash, same as a real
@@ -88,7 +118,9 @@ Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives 
 
 ### Reader & device features (inherited from CrossPoint)
 
-- **Reader engine**: EPUB 2/3 rendering with embedded-style option, image handling, hyphenation, kerning, chapter navigation, footnotes, bookmarks, go-to-percent, auto page turn, orientation control, focus reading, KOReader progress sync and more.
+- **Reader engine**: EPUB 2/3 rendering with embedded-style option, image handling, hyphenation,
+  kerning, chapter navigation, footnotes, bookmarks, go-to-percent, auto page turn, orientation control,
+  focus reading, KOReader progress sync, time-remaining estimates and more.
 
 - **Various formats**: native handling for `.epub`, `.xtc/.xtch`, `.txt`, and `.bmp`.
 
@@ -100,12 +132,49 @@ Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives 
 
 - **Library workflow**: one unified file browser (from Home → Browse Files) that lists every file with
   sizes, shows `/.radioink/` and other dot-folders, opens books, and deletes anything via long-press;
-  plus recent books and SD-cache management.
+  plus recent books, Recent Books library views (**Continue / Finished / All**), and SD-cache management.
+
+- **Offline dictionary lookup**: from the EPUB reader menu, choose **Dictionary**, pick a word from the
+  current page, and Radio Ink looks it up from SD. Use `scripts/gcide_to_tsv.py` to convert GNU GCIDE into
+  `dictionary.tsv`, then `scripts/split_dictionary.py` to create `/dictionary/a.tsv`, `/dictionary/b.tsv`,
+  etc. on the SD card. The firmware checks the sharded files first and falls back to `/dictionary.tsv`.
+
+- **Notepad**: a two-level on-device notes / to-do app (Home → Tools → Notepad) saved to a readable `/notes.txt` on
+  SD. Titled **pages** are each a free-text **note** (scrollable, word-wrapped body you append to or rewrite)
+  or a **checklist** (toggleable items); convert either way. A discard-changes prompt guards against losing
+  text on an accidental Back. **Sync over Wi-Fi** stands up a captive-portal web editor (join the QR, edit
+  `/notes.txt` from a phone/PC, Save) — reboots on exit to free memory.
+
+- **Clock**: a three-mode clock utility (Home → Tools → Clock), tabs switched left/right — **Clock** (wall time +
+  date from the RTC), **Stopwatch**, and **Timer** (count-down with a blinking full-screen alert at zero).
+
+- **Authenticator**: an on-device TOTP 2FA code generator (Home → Tools → Authenticator) — base32 secrets in a
+  readable `/totp.txt`, 6-digit codes via mbedtls HMAC-SHA1 off the DS3231 RTC (set the clock first with
+  Radio Ink → Network → NTP Time Sync). Add/delete on device or drop the file on the SD card.
+
+- **Badge**: a full-screen digital identity card (Home → Tools → Badge) — Radio Ink skull, name/handle, subtitle,
+  and a scannable QR (URL or vCard/MECARD). Press Left for a full-screen QR; Confirm to edit. Config in a
+  readable `/badge.txt`. (No NFC on the C3 — the QR is the tap.)
+
+- **Password Generator** (Home → Tools): `esp_random()`-backed, adjustable length and character set
+  (letters+digits, +symbols, or digits-only for a PIN), with an entropy estimate.
+
+- **Hash Calculator** (Home → Tools): MD5 / SHA-1 / SHA-256 of typed text, via mbedtls.
+
+- **Encode / Decode** (Home → Tools): Base64, Hex, and URL — encode or decode, cycled with Left/Right.
+
+- **QR Generator** (Home → Tools): type any text (a URL, a Wi-Fi PSK, anything) and see it as a full-screen
+  scannable QR — separate from Badge's fixed one.
 
 - **Movies (novelty)**: a monochrome flipbook player (Home → Movies) for 1-bit `.rivid` frame packs
   converted off-device with `scripts/gen_video.py`. It is **not** real video — the e-ink panel runs at a
   few fps, monochrome, no audio — but it'll flip high-contrast clips you convert yourself. Pause/End has
   an **autoloop** toggle that persists across reboots.
+
+- **Resume on wake**: waking from sleep returns you to the tool or menu you were using (a reading book already
+  resumed; now the Tools, File Browser, Recents, Settings, Movies, and Radio Audit do too) instead of always
+  dropping to Home. A full power-on or software restart still starts fresh at Home, and holding **Back** while
+  the device boots forces Home.
 
 - **Wireless workflows**:
 
@@ -213,6 +282,38 @@ needed. Radio Ink uses CrossPoint's font system unchanged, so the upstream build
 
 Conversion runs the firmware repo's `lib/EpdFont/scripts/fontconvert_sdcard.py` script unmodified, so
 output matches a local host build.
+
+---
+
+## Offline dictionary files
+
+The EPUB reader's **Dictionary** menu item needs dictionary data on the SD card. The firmware prefers
+sharded files because it only has to scan the selected word's first-letter file:
+
+```text
+/dictionary/a.tsv
+/dictionary/b.tsv
+/dictionary/c.tsv
+...
+```
+
+It also supports a flat fallback file:
+
+```text
+/dictionary.tsv
+```
+
+To generate the recommended sharded dictionary locally from GNU GCIDE:
+
+```bash
+curl -L https://ftp.gnu.org/gnu/gcide/gcide-latest.tar.xz -o gcide-latest.tar.xz
+tar -xf gcide-latest.tar.xz
+python3 scripts/gcide_to_tsv.py gcide-*/ dictionary.tsv
+python3 scripts/split_dictionary.py dictionary.tsv dictionary
+```
+
+Then copy the generated `dictionary/` folder to the root of the SD card. A GCIDE-based build is about
+12-14 MB and produces roughly 108k lookup entries.
 
 ---
 
@@ -365,6 +466,12 @@ Radio Ink is a fork and would not exist without the upstream work it builds on:
 - **[diy-esp32-epub-reader](https://github.com/atomic14/diy-esp32-epub-reader)** by **atomic14** — the
   project that originally inspired CrossPoint.
 - The CrossPoint contributors, translators, and community-fork authors.
+- **[ESP32Marauder](https://github.com/justcallmekoko/ESP32Marauder)** by **justcallmekoko** (GPL-3.0) —
+  the tracker **Play Sound** feature (make a separated AirTag / Find My accessory chirp) is based on his
+  work. The three-protocol approach (DULT / FMNA / legacy AirTag), the service & characteristic UUIDs, the
+  command bytes, and the subscribe-before-write + observed-address-type requirements all come from studying
+  ESP32Marauder; Radio Ink's version is an independent reimplementation for the Bluedroid BLE stack (Marauder
+  uses NimBLE), and the credit for the technique is his.
 - **Radio Ink** — the RF-audit fork, audit tool, theme, and dev rig — by **dag nazty**
   (<https://dagnazty.dev>).
 

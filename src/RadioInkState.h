@@ -16,6 +16,9 @@ class RadioInkState {
   uint8_t readerActivityLoadCount = 0;
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
+  // Screen to restore on wake (a ResumeTarget cast to uint8_t; 0 == Home == no
+  // resume). Recorded at sleep time, honored by the boot router.
+  uint8_t resumeActivity = 0;
 
   // Returns true if idx was shown within the last checkCount picks.
   // Walks backwards from the most recently written slot.

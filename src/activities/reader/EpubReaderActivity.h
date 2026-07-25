@@ -3,6 +3,8 @@
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 
 #include "EpubReaderMenuActivity.h"
@@ -41,6 +43,11 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+  static constexpr uint8_t TIME_REMAINING_SAMPLE_COUNT = 4;
+  uint32_t pageTurnIntervals[TIME_REMAINING_SAMPLE_COUNT] = {};
+  uint8_t pageTurnIntervalIndex = 0;
+  uint8_t pageTurnIntervalCount = 0;
+  unsigned long lastEstimatePageTurnAt = 0UL;
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
@@ -66,6 +73,11 @@ class EpubReaderActivity final : public Activity {
   void applyOrientation(uint8_t orientation);
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
+  void recordForwardPageTurn();
+  uint32_t getAveragePageTurnMs() const;
+  uint32_t estimateBookRemainingPages() const;
+  void buildTimeRemainingText(char* out, size_t outSize) const;
+  void buildCompactTimeRemainingText(char* out, size_t outSize) const;
   void addBookmark();
 
   // Footnote navigation

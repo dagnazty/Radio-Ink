@@ -192,6 +192,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                             "removeReadBooksFromRecents", StrId::STR_CAT_SYSTEM),
         SettingInfo::Toggle(StrId::STR_MOVE_FINISHED_TO_READ, &RadioInkSettings::moveFinishedToReadFolder,
                             "moveFinishedToReadFolder", StrId::STR_CAT_SYSTEM),
+        SettingInfo::Enum(StrId::STR_SD_LOGGING, &RadioInkSettings::sdLogLevel,
+                          {StrId::STR_STATE_OFF, StrId::STR_LOG_ERRORS, StrId::STR_LOG_INFO, StrId::STR_LOG_DEBUG},
+                          "sdLogLevel", StrId::STR_CAT_SYSTEM),
 
         // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
         SettingInfo::DynamicString(

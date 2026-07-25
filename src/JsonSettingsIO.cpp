@@ -9,9 +9,9 @@
 #include <string>
 
 #include "BookmarkEntry.h"
+#include "OpdsServerStore.h"
 #include "RadioInkSettings.h"
 #include "RadioInkState.h"
-#include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SettingsList.h"
 #include "WifiCredentialStore.h"
@@ -77,6 +77,7 @@ bool JsonSettingsIO::saveState(const RadioInkState& s, const char* path) {
   doc["readerActivityLoadCount"] = s.readerActivityLoadCount;
   doc["lastSleepFromReader"] = s.lastSleepFromReader;
   doc["showBootScreen"] = s.showBootScreen;
+  doc["resumeActivity"] = s.resumeActivity;
 
   String json;
   serializeJson(doc, json);
@@ -112,6 +113,7 @@ bool JsonSettingsIO::loadState(RadioInkState& s, const char* json) {
   s.readerActivityLoadCount = doc["readerActivityLoadCount"] | static_cast<uint8_t>(0);
   s.lastSleepFromReader = doc["lastSleepFromReader"] | false;
   s.showBootScreen = doc["showBootScreen"] | true;
+  s.resumeActivity = doc["resumeActivity"] | static_cast<uint8_t>(0);
   return true;
 }
 
@@ -225,9 +227,8 @@ bool JsonSettingsIO::loadSettings(RadioInkSettings& s, const char* json, bool* n
   }
 
   if (doc["sleepTimeoutMinutes"].isNull() && !doc["sleepTimeout"].isNull()) {
-    const uint8_t legacyValue =
-        clamp(doc["sleepTimeout"] | (uint8_t)RadioInkSettings::SLEEP_10_MIN, RadioInkSettings::SLEEP_TIMEOUT_COUNT,
-              (uint8_t)RadioInkSettings::SLEEP_10_MIN);
+    const uint8_t legacyValue = clamp(doc["sleepTimeout"] | (uint8_t)RadioInkSettings::SLEEP_10_MIN,
+                                      RadioInkSettings::SLEEP_TIMEOUT_COUNT, (uint8_t)RadioInkSettings::SLEEP_10_MIN);
     s.sleepTimeoutMinutes = RadioInkSettings::sleepTimeoutEnumToMinutes(legacyValue);
     if (needsResave) *needsResave = true;
   }

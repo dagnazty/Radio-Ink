@@ -198,6 +198,9 @@ class RadioInkSettings {
   // Set once an NTP sync succeeds. Used to skip re-syncing on every WiFi connect.
   // Resetting to 0 (e.g. via the web UI) forces a re-sync on next WiFi connect.
   uint8_t clockHasBeenSynced = 0;
+  // Persistent SD-card log verbosity: 0 = off, 1 = errors, 2 = errors+info,
+  // 3 = errors+info+debug. Written to /radioink.log. Default: errors only.
+  uint8_t sdLogLevel = 1;
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = 1;

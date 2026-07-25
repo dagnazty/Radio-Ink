@@ -13,13 +13,13 @@
 #include <esp_system.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <iterator>
 #include <limits>
 
 #include "BookmarkEntry.h"
-#include "RadioInkSettings.h"
-#include "RadioInkState.h"
+#include "EpubDictionaryActivity.h"
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
@@ -30,6 +30,8 @@
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
+#include "RadioInkSettings.h"
+#include "RadioInkState.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
@@ -41,6 +43,7 @@ namespace {
 // pagesPerRefresh now comes from SETTINGS.getRefreshFrequency()
 // pages per minute, first item is 1 to prevent division by zero if accessed
 constexpr int PAGE_TURN_RATES[] = {1, 1, 3, 6, 12};
+constexpr uint32_t MINUTE_MS = 60UL * 1000UL;
 
 int clampPercent(int percent) {
   if (percent < 0) {
@@ -61,6 +64,18 @@ constexpr char READ_FOLDER[] = "/read";
 bool isInReadFolder(const std::string& path) {
   constexpr size_t n = sizeof(READ_FOLDER) - 1;  // length of "/Read" (excludes NUL)
   return path.size() > n && path.compare(0, n, READ_FOLDER) == 0 && path[n] == '/';
+}
+
+void formatDurationMinutes(uint32_t minutes, char* out, size_t outSize) {
+  if (!out || outSize == 0) {
+    return;
+  }
+  if (minutes < 60) {
+    snprintf(out, outSize, tr(STR_REMAINING_MIN_FORMAT), static_cast<unsigned>(minutes));
+    return;
+  }
+  snprintf(out, outSize, tr(STR_REMAINING_HOUR_MIN_FORMAT), static_cast<unsigned>(minutes / 60),
+           static_cast<unsigned>(minutes % 60));
 }
 
 // Pick a non-colliding destination path inside /Read/ for a finished book.
@@ -271,9 +286,12 @@ void EpubReaderActivity::loop() {
         bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
       }
       const int bookProgressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
+      char timeRemainingText[48];
+      buildTimeRemainingText(timeRemainingText, sizeof(timeRemainingText));
+      lastEstimatePageTurnAt = 0UL;
       startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
                                  renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-                                 SETTINGS.orientation, !currentPageFootnotes.empty()),
+                                 SETTINGS.orientation, timeRemainingText, !currentPageFootnotes.empty()),
                              [this](const ActivityResult& result) {
                                // Always apply orientation change even if the menu was cancelled
                                const auto& menu = std::get<MenuResult>(result.data);
@@ -527,6 +545,47 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           });
       break;
     }
+    case EpubReaderMenuActivity::MenuAction::DICTIONARY: {
+      // DictionaryWordList is ~2.5KB; keep it off this deep reader-task stack.
+      auto words = makeUniqueNoThrow<DictionaryWordList>();
+      if (!words) {
+        LOG_ERR("ERS", "OOM: dictionary word list");
+        requestUpdate();
+        break;
+      }
+      if (section) {
+        auto page = section->loadPageFromSectionFile();
+        if (page) {
+          for (const auto& el : page->elements) {
+            if (el->getTag() != TAG_PageLine) {
+              continue;
+            }
+            const auto& line = static_cast<const PageLine&>(*el);
+            if (!line.getBlock()) {
+              continue;
+            }
+            for (const auto& word : line.getBlock()->getWords()) {
+              words->addRawWord(word);
+              if (words->count >= DictionaryWordList::MAX_WORDS) {
+                break;
+              }
+            }
+            if (words->count >= DictionaryWordList::MAX_WORDS) {
+              break;
+            }
+          }
+        }
+      }
+
+      auto dictionaryActivity = makeUniqueNoThrow<EpubDictionaryActivity>(renderer, mappedInput, *words);
+      if (!dictionaryActivity) {
+        LOG_ERR("ERS", "OOM: dictionary activity (%u bytes)", static_cast<unsigned>(sizeof(EpubDictionaryActivity)));
+        requestUpdate();
+        break;
+      }
+      startActivityForResult(std::move(dictionaryActivity), [this](const ActivityResult&) { requestUpdate(); });
+      break;
+    }
     case EpubReaderMenuActivity::MenuAction::FOOTNOTES: {
       startActivityForResult(std::make_unique<EpubReaderFootnotesActivity>(renderer, mappedInput, currentPageFootnotes),
                              [this](const ActivityResult& result) {
@@ -711,6 +770,8 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
+  const int beforeSpineIndex = currentSpineIndex;
+  const int beforePage = section ? section->currentPage : nextPageNumber;
   if (isForwardTurn) {
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
@@ -737,8 +798,130 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
       }
     }
   }
+  if (isForwardTurn && (currentSpineIndex != beforeSpineIndex || (section && section->currentPage != beforePage))) {
+    recordForwardPageTurn();
+  } else if (!isForwardTurn) {
+    lastEstimatePageTurnAt = 0UL;
+  }
   lastPageTurnTime = millis();
   requestUpdate();
+}
+
+void EpubReaderActivity::recordForwardPageTurn() {
+  const unsigned long now = millis();
+  if (lastEstimatePageTurnAt != 0UL) {
+    const unsigned long elapsed = now - lastEstimatePageTurnAt;
+    if (elapsed > 0 && elapsed <= std::numeric_limits<uint32_t>::max()) {
+      pageTurnIntervals[pageTurnIntervalIndex] = static_cast<uint32_t>(elapsed);
+      pageTurnIntervalIndex = (pageTurnIntervalIndex + 1) % TIME_REMAINING_SAMPLE_COUNT;
+      if (pageTurnIntervalCount < TIME_REMAINING_SAMPLE_COUNT) {
+        pageTurnIntervalCount++;
+      }
+    }
+  }
+  lastEstimatePageTurnAt = now;
+}
+
+uint32_t EpubReaderActivity::getAveragePageTurnMs() const {
+  if (pageTurnIntervalCount == 0) {
+    return 0;
+  }
+
+  uint64_t totalMs = 0;
+  for (uint8_t i = 0; i < pageTurnIntervalCount; i++) {
+    totalMs += pageTurnIntervals[i];
+  }
+  return static_cast<uint32_t>(totalMs / pageTurnIntervalCount);
+}
+
+uint32_t EpubReaderActivity::estimateBookRemainingPages() const {
+  if (!epub || !section || section->pageCount <= 0 || currentSpineIndex < 0 ||
+      currentSpineIndex >= epub->getSpineItemsCount()) {
+    return 0;
+  }
+
+  const uint32_t chapterRemaining = (section->currentPage < section->pageCount - 1)
+                                        ? static_cast<uint32_t>(section->pageCount - section->currentPage - 1)
+                                        : 0;
+  const size_t currentCumulative = epub->getCumulativeSpineItemSize(currentSpineIndex);
+  const size_t previousCumulative =
+      (currentSpineIndex > 0) ? epub->getCumulativeSpineItemSize(currentSpineIndex - 1) : 0;
+  const size_t currentSpineSize = currentCumulative > previousCumulative ? currentCumulative - previousCumulative : 0;
+  const size_t bookSize = epub->getBookSize();
+  const size_t remainingBytesAfterChapter = bookSize > currentCumulative ? bookSize - currentCumulative : 0;
+
+  if (currentSpineSize == 0 || remainingBytesAfterChapter == 0) {
+    return chapterRemaining;
+  }
+
+  const uint64_t estimatedFuturePages =
+      (static_cast<uint64_t>(remainingBytesAfterChapter) * static_cast<uint32_t>(section->pageCount) +
+       currentSpineSize - 1) /
+      currentSpineSize;
+  const uint64_t totalPages = static_cast<uint64_t>(chapterRemaining) + estimatedFuturePages;
+  return totalPages > std::numeric_limits<uint32_t>::max() ? std::numeric_limits<uint32_t>::max()
+                                                           : static_cast<uint32_t>(totalPages);
+}
+
+void EpubReaderActivity::buildTimeRemainingText(char* out, size_t outSize) const {
+  if (!out || outSize == 0) {
+    return;
+  }
+  out[0] = '\0';
+
+  const uint32_t averagePageTurnMs = getAveragePageTurnMs();
+  if (averagePageTurnMs == 0 || !section || section->pageCount <= 0) {
+    return;
+  }
+
+  const uint32_t chapterRemainingPages = (section->currentPage < section->pageCount - 1)
+                                             ? static_cast<uint32_t>(section->pageCount - section->currentPage - 1)
+                                             : 0;
+  const uint32_t bookRemainingPages = estimateBookRemainingPages();
+  if (chapterRemainingPages == 0 && bookRemainingPages == 0) {
+    return;
+  }
+
+  const uint32_t chapterMinutes =
+      chapterRemainingPages == 0
+          ? 0
+          : static_cast<uint32_t>((static_cast<uint64_t>(chapterRemainingPages) * averagePageTurnMs + MINUTE_MS - 1) /
+                                  MINUTE_MS);
+  const uint32_t bookMinutes =
+      bookRemainingPages == 0
+          ? 0
+          : static_cast<uint32_t>((static_cast<uint64_t>(bookRemainingPages) * averagePageTurnMs + MINUTE_MS - 1) /
+                                  MINUTE_MS);
+
+  char chapterDuration[16];
+  char bookDuration[16];
+  formatDurationMinutes(chapterMinutes, chapterDuration, sizeof(chapterDuration));
+  formatDurationMinutes(bookMinutes, bookDuration, sizeof(bookDuration));
+  snprintf(out, outSize, tr(STR_TIME_LEFT_FORMAT), tr(STR_CHAPTER_SHORT), chapterDuration, tr(STR_BOOK_SHORT),
+           bookDuration);
+}
+
+void EpubReaderActivity::buildCompactTimeRemainingText(char* out, size_t outSize) const {
+  if (!out || outSize == 0) {
+    return;
+  }
+  out[0] = '\0';
+
+  const uint32_t averagePageTurnMs = getAveragePageTurnMs();
+  if (averagePageTurnMs == 0) {
+    return;
+  }
+
+  const uint32_t bookRemainingPages = estimateBookRemainingPages();
+  if (bookRemainingPages == 0) {
+    return;
+  }
+
+  const uint32_t bookMinutes = static_cast<uint32_t>(
+      (static_cast<uint64_t>(bookRemainingPages) * averagePageTurnMs + MINUTE_MS - 1) / MINUTE_MS);
+  char bookDuration[16];
+  formatDurationMinutes(bookMinutes, bookDuration, sizeof(bookDuration));
+  snprintf(out, outSize, "~%s", bookDuration);
 }
 
 // TODO: Failure handling
@@ -1147,6 +1330,17 @@ void EpubReaderActivity::renderStatusBar() const {
 
   } else if (SETTINGS.statusBarTitle == RadioInkSettings::STATUS_BAR_TITLE::BOOK_TITLE) {
     title = epub->getTitle();
+  }
+
+  if (!automaticPageTurnActive && SETTINGS.statusBarTitle != RadioInkSettings::STATUS_BAR_TITLE::HIDE_TITLE) {
+    char timeRemainingText[20];
+    buildCompactTimeRemainingText(timeRemainingText, sizeof(timeRemainingText));
+    if (timeRemainingText[0]) {
+      if (!title.empty()) {
+        title += "  ";
+      }
+      title += timeRemainingText;
+    }
   }
 
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset);

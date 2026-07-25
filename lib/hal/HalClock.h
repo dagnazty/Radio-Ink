@@ -34,6 +34,12 @@ class HalClock {
   // Returns false if RTC is not available.
   bool getTime(uint8_t& hour, uint8_t& minute) const;
 
+  // Read the full date+time from the DS3231 and return it as a UTC Unix epoch
+  // (seconds since 1970-01-01). The RTC is kept in UTC by syncFromNTP. Returns
+  // false if the RTC is unavailable or its time has never been validly set
+  // (OSF) — callers should prompt for an NTP sync in that case. Used by TOTP.
+  bool getUnixTime(uint32_t& epoch) const;
+
   // Format time into a caller-provided buffer.
   // 24h mode produces "HH:MM" (needs >=6 bytes); 12h mode produces "H:MM AM"/"HH:MM PM" (needs >=9 bytes).
   // utcOffsetQuarterHoursBiased: biased quarter-hour offset (48 = UTC+0, 0 = UTC-12, 104 = UTC+14).
@@ -50,7 +56,10 @@ class HalClock {
   bool syncFromNTP();
 
  private:
-  bool writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second);
+  // Writes the full date+time (regs 0x00-0x06) in 24h UTC. Date is included so
+  // the RTC holds a real calendar date (needed for Unix-epoch reads / TOTP), not
+  // just H:M:S as earlier firmware did.
+  bool writeTimeToRTC(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second);
 
   // Single-register DS3231 access helpers.
   bool readRegister(uint8_t reg, uint8_t& value) const;

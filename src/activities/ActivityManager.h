@@ -16,7 +16,63 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, RADIO_AUDIT, MOVIES, SETTINGS_MENU, ABOUT };
+// The utility apps (Notepad/Badge/Authenticator/Clock) live under the home "Tools"
+// entry now, not directly on the home menu; NOTEPAD/BADGE/AUTHENTICATOR/CLOCK stay
+// in the enum only for the goHome name-mapping fallback.
+enum class HomeMenuItem {
+  NONE,
+  FILE_BROWSER,
+  RECENTS,
+  OPDS_BROWSER,
+  FILE_TRANSFER,
+  RADIO_AUDIT,
+  MOVIES,
+  TOOLS,
+  NOTEPAD,
+  BADGE,
+  AUTHENTICATOR,
+  CLOCK,
+  SETTINGS_MENU,
+  ABOUT
+};
+
+// Items inside the Tools submenu (used to preselect a row when returning to it).
+enum class ToolItem {
+  NONE,
+  NOTEPAD,
+  BADGE,
+  AUTHENTICATOR,
+  CLOCK,
+  PASSWORD_GEN,
+  HASH_CALC,
+  ENCODE_DECODE,
+  QR_GEN,
+  CALENDAR
+};
+
+// Which screen to restore when waking from sleep. Persisted in RadioInkState as a
+// uint8_t, so append new values at the end and never renumber existing ones. Only
+// "safe" screens are listed here; network/AP/reader activities resume via their own
+// paths or fall back to home. Home == "no resume".
+enum class ResumeTarget : uint8_t {
+  Home = 0,
+  Tools,
+  Notepad,
+  Badge,
+  Authenticator,
+  Clock,
+  PasswordGen,
+  HashCalc,
+  EncodeDecode,
+  QrGen,
+  RadioAudit,
+  FileBrowser,
+  RecentBooks,
+  Settings,
+  About,
+  Movies,
+  Calendar
+};
 
 /**
  * ActivityManager
@@ -87,8 +143,27 @@ class ActivityManager {
   void goToBrowser();
   void goToRadioAudit();
   void goToMovies();
+  void goToNotepad();
+  void goToBadge();
+  void goToAuthenticator();
+  void goToClock();
+  void goToCalendar();
+  void goToPasswordGen();
+  void goToHashCalc();
+  void goToEncodeDecode();
+  void goToQrGen();
+  void goToTools(ToolItem initial = ToolItem::NONE);
   void goToAbout();
   void goToReader(std::string path);
+
+  // Map the current activity to a resume target for sleep persistence. Returns
+  // ResumeTarget::Home when the current screen shouldn't be auto-restored on wake
+  // (network/AP screens, the reader, or anything not in the whitelist).
+  ResumeTarget currentResumeTarget() const;
+  // Restore a resume target when waking from sleep. Returns false for Home/unknown
+  // so the caller can fall back to goHome().
+  bool resumeActivity(ResumeTarget target);
+
   void goToSleep(bool fromTimeout = false);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);

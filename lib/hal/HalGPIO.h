@@ -101,6 +101,11 @@ class HalGPIO {
 
   WakeupReason getWakeupReason() const;
 
+  // True only when this boot is a resume from our deep sleep (as opposed to a cold
+  // power-on or a software restart). Lets the boot router restore the last screen on
+  // wake while a full power-on still starts fresh at home.
+  bool wokeFromDeepSleep() const;
+
   // Button indices
   static constexpr uint8_t BTN_BACK = 0;
   static constexpr uint8_t BTN_CONFIRM = 1;

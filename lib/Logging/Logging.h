@@ -57,6 +57,21 @@ void logPrintf(const char* level, const char* origin, const char* format, ...);
 
 std::string getLastLogs();
 void clearLastLogs();
+
+// --- Persistent SD logging ---------------------------------------------------
+// logPrintf() stages qualifying lines into a small in-RAM ring; a safe task
+// context (the main loop) drains them to the SD card. logPrintf never touches
+// the SD card itself -- HalStorage's mutex is non-recursive and errors are
+// logged from inside storage paths, so a direct write could deadlock.
+
+// Runtime SD-log verbosity: 0 = off, 1 = ERR, 2 = ERR+INF, 3 = ERR+INF+DBG.
+// Push the user setting here (e.g. from the main loop); safe to call anytime.
+void setSdLogLevel(uint8_t level);
+
+// Drain staged lines to `sink`, one line at a time (each already '\n'-terminated).
+// Call ONLY from a normal task context (never an ISR, never while holding the
+// storage mutex). Returns the number of lines drained. Cheap no-op when idle.
+void drainSdLogs(void (*sink)(const char* line));
 // Validates the RTC log state (magic word + logHead range). Returns true if
 // corruption was detected (magic mismatch or logHead out of range), meaning
 // logMessages is untrusted garbage. Callers should call clearLastLogs() when

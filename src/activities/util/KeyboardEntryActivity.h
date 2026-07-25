@@ -22,12 +22,15 @@ class KeyboardEntryActivity : public Activity {
  public:
   explicit KeyboardEntryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                  std::string title = "Enter Text", std::string initialText = "",
-                                 const size_t maxLength = 0, InputType inputType = InputType::Text)
+                                 const size_t maxLength = 0, InputType inputType = InputType::Text,
+                                 bool confirmDiscard = false)
       : Activity("KeyboardEntry", renderer, mappedInput),
         title(std::move(title)),
-        text(std::move(initialText)),
+        text(initialText),
+        originalText(std::move(initialText)),
         maxLength(maxLength),
-        inputType(inputType) {}
+        inputType(inputType),
+        confirmDiscard(confirmDiscard) {}
 
   void onEnter() override;
   void onExit() override;
@@ -37,8 +40,10 @@ class KeyboardEntryActivity : public Activity {
  private:
   std::string title;
   std::string text;
+  std::string originalText;  // text as opened, to detect unsaved changes on exit
   size_t maxLength;
   InputType inputType;
+  bool confirmDiscard;  // prompt before discarding changed text on Back
   bool passwordVisible = false;
 
   ButtonNavigator buttonNavigator;

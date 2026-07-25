@@ -9,9 +9,18 @@
 #include "components/UITheme.h"
 #include "components/icons/book.h"
 #include "components/icons/bookmark.h"
+#include "components/icons/calendar.h"
+#include "components/icons/clock.h"
+#include "components/icons/film.h"
 #include "components/icons/folder.h"
+#include "components/icons/hash.h"
 #include "components/icons/hotspot.h"
+#include "components/icons/info.h"
+#include "components/icons/key.h"
 #include "components/icons/library.h"
+#include "components/icons/lock.h"
+#include "components/icons/note.h"
+#include "components/icons/qrcode.h"
 #include "components/icons/recent.h"
 #include "components/icons/settings2.h"
 #include "components/icons/transfer.h"
@@ -26,16 +35,44 @@ namespace {
 // labels stay aligned across every menu.
 const uint8_t* radioInkIcon32(UIIcon icon) {
   switch (icon) {
-    case UIIcon::Wifi: return WifiIcon;
-    case UIIcon::Hotspot: return HotspotIcon;
-    case UIIcon::Library: return LibraryIcon;
-    case UIIcon::Transfer: return TransferIcon;
-    case UIIcon::Folder: return FolderIcon;
-    case UIIcon::Bookmark: return BookmarkIcon;
-    case UIIcon::Recent: return RecentIcon;
-    case UIIcon::Settings: return Settings2Icon;
-    case UIIcon::Book: return BookIcon;
-    default: return nullptr;
+    case UIIcon::Wifi:
+      return WifiIcon;
+    case UIIcon::Hotspot:
+      return HotspotIcon;
+    case UIIcon::Library:
+      return LibraryIcon;
+    case UIIcon::Transfer:
+      return TransferIcon;
+    case UIIcon::Folder:
+      return FolderIcon;
+    case UIIcon::Bookmark:
+      return BookmarkIcon;
+    case UIIcon::Recent:
+      return RecentIcon;
+    case UIIcon::Settings:
+      return Settings2Icon;
+    case UIIcon::Book:
+      return BookIcon;
+    case UIIcon::Clock:
+      return ClockIcon;
+    case UIIcon::Lock:
+      return LockIcon;
+    case UIIcon::Hash:
+      return HashIcon;
+    case UIIcon::Key:
+      return KeyIcon;
+    case UIIcon::Note:
+      return NoteIcon;
+    case UIIcon::QrCode:
+      return QrcodeIcon;
+    case UIIcon::Film:
+      return FilmIcon;
+    case UIIcon::Calendar:
+      return CalendarIcon;
+    case UIIcon::Info:
+      return InfoIcon;
+    default:
+      return nullptr;
   }
 }
 constexpr int kMenuIconSize = 32;
@@ -144,7 +181,7 @@ void RadioInkTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonC
 }
 
 void RadioInkTheme::drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,
-                              bool /*selected*/) const {
+                               bool /*selected*/) const {
   constexpr int HPAD = 8;
   int x = rect.x + LyraMetrics::values.contentSidePadding;
   for (const auto& tab : tabs) {

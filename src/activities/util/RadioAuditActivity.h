@@ -53,6 +53,18 @@ class RadioAuditActivity final : public Activity {
     Guardian,
     ScheduledLog,
     About,
+    MdnsBrowse,
+    LanScan,
+    NtpSync,
+    NetInfo,
+    PortProbe,
+    SubnetCalc,
+    Traceroute,
+    DhcpProbe,
+    SnmpSweep,
+    WpsAudit,
+    SystemStats,
+    I2cScan,
     COUNT,
   };
 
@@ -67,6 +79,11 @@ class RadioAuditActivity final : public Activity {
     GUARDIAN,
     LOG_SETUP,
     LOGGING,
+    MDNS_QUERY,
+    LAN_SCAN,
+    PORT_PROBE,
+    TRACEROUTE,
+    SNMP_SWEEP,
     DONE,
     SAVED,
     ERROR
@@ -86,15 +103,17 @@ class RadioAuditActivity final : public Activity {
     int32_t channel = 0;
     int32_t seenCount = 0;
     bool hidden = false;
-    bool wps = false;     // WPS advertised in the AP's scan record (PIN-attack surface)
-    bool marked = false;  // selected as a deauth target ("Deauth selected")
+    bool wps = false;          // WPS advertised in the AP's scan record (PIN-attack surface)
+    bool marked = false;       // selected as a deauth target ("Deauth selected")
+    bool ssidChanged = false;  // this BSSID reported a different SSID on a later pass (KARMA signature)
   };
 
   struct BleFinding {
     std::string address;
+    uint8_t addrType = 0;  // esp_ble_addr_type_t observed in the advert (needed to connect)
     std::string name;
     std::string manufacturerHex;
-    std::string serviceUuid;      // advertised primary service UUID (e.g. Meshtastic)
+    std::string serviceUuid;  // advertised primary service UUID (e.g. Meshtastic)
     std::string serviceDataUuid;
     std::string serviceDataHex;
     int rssi = 0;
@@ -126,14 +145,16 @@ class RadioAuditActivity final : public Activity {
   struct CameraTarget {
     enum class Kind { WifiAp, Client, Ble };
     Kind kind = Kind::Client;
-    std::string mac;      // AP BSSID / client MAC / BLE address
-    std::string label;    // SSID or device name
-    std::string reason;   // why it was flagged
+    std::string mac;       // AP BSSID / client MAC / BLE address
+    uint8_t addrType = 0;  // BLE address type (esp_ble_addr_type_t) for BLE targets
+    std::string label;     // SSID or device name
+    std::string reason;    // why it was flagged
     uint8_t macBytes[6] = {};
     uint8_t apBytes[6] = {};  // for clients: the AP they're associated to (directed deauth)
     bool hasAp = false;
     int channel = 0;
     int rssi = 0;
+    bool findMy = false;  // Apple Find My / AirTag — eligible for the play-sound action
   };
 
   ButtonNavigator buttonNavigator;
@@ -150,11 +171,13 @@ class RadioAuditActivity final : public Activity {
   bool showingBleDetails = false;
   bool showingFindings = false;
   bool showingTarget = false;
-  bool showingCameraList = false;  // selectable list of camera hits from the sweep
-  bool targetFromList = false;     // true if the detail view was opened from a results list
+  bool showingCameraList = false;     // selectable list of camera hits from the sweep
+  bool targetFromList = false;        // true if the detail view was opened from a results list
   bool targetFromCameraList = false;  // detail was opened from the camera list (Back returns there)
   std::vector<CameraTarget> cameraTargets;
   int cameraSel = 0;
+  std::string cameraListTitle = "Cameras";  // header for the selectable-hit list (reused by Tracker Sweep)
+  bool targetIsFindMy = false;              // detail view target is an Apple Find My / AirTag tracker
   // Camera target currently in the detail view (for directed deauth).
   bool targetIsCamera = false;
   bool targetCamHasAp = false;
@@ -176,6 +199,7 @@ class RadioAuditActivity final : public Activity {
   uint8_t targetLocBssid[6] = {};
   int targetLocChannel = 0;
   std::string targetLocAddr;
+  uint8_t targetLocAddrType = 0;  // BLE address type for the located/beeped tracker
   std::string targetLocName;
 
   // Live RSSI locator ("find it") state.
@@ -260,6 +284,60 @@ class RadioAuditActivity final : public Activity {
   int logRadioSel = 0;             // 0 = WiFi+BLE, 1 = WiFi only, 2 = BLE only
   uint32_t logStartMs = 0;         // when logging began (for the auto-stop duration)
 
+  // mDNS Browser: after associating to a network (WifiSelectionActivity), query
+  // one service type per loop tick (each query blocks ~1 s) so the watchdog never
+  // trips, accumulating responders into targetLines. mdnsActive marks that we
+  // brought up STA + the mDNS responder, so onExit tears them down.
+  int mdnsServiceIdx = 0;   // index into the service-type table for the next pass
+  int mdnsFoundCount = 0;   // responders collected so far this session
+  bool mdnsActive = false;  // true once associated + MDNS.begin(); drives onExit cleanup
+
+  // One discovered mDNS responder, kept structured so the result list is
+  // selectable and a detail view can show the full advertisement (incl. TXT
+  // metadata, which carries model/version/path hints per device).
+  struct MdnsResult {
+    std::string label;     // service-type label ("Printer", "Cast", ...)
+    std::string instance;  // friendly instance name
+    std::string host;      // <hostname>.local
+    std::string ip;        // resolved IPv4
+    uint16_t port = 0;
+    std::vector<std::string> txt;  // advertised "key=value" pairs
+  };
+  std::vector<MdnsResult> mdnsResults;
+  int mdnsSel = 0;                  // selected row in the mDNS results list
+  bool showingMdnsList = false;     // selectable list of discovered services
+  bool targetFromMdnsList = false;  // detail opened from the mDNS list (Back returns there)
+
+  // LAN Scanner: after associating, ARP-sweep the local /24 a batch of hosts per
+  // loop tick (etharp_request) and harvest resolved IP/MAC pairs from the lwip
+  // ARP table, so live hosts surface with their vendor without blocking.
+  struct LanHost {
+    uint32_t ip = 0;  // host byte order
+    std::string mac;
+    std::string vendor;
+  };
+  std::vector<LanHost> lanHosts;
+  uint32_t lanBase = 0;     // network address with host octet zeroed (host byte order)
+  uint32_t lanGateway = 0;  // gateway IP (host byte order), flagged in the list
+  int lanNext = 0;          // next host octet to probe (1..254); 0 = not started
+  int lanDrain = 0;         // post-sweep ticks to catch late ARP replies
+
+  // Port Probe: TCP-connect to a curated port list on one host, one port per loop
+  // tick (watchdog-safe), grabbing an HTTP banner where applicable.
+  IPAddress probeTarget;
+  int probePortIdx = 0;
+  std::vector<std::string> probeOpen;  // "<port>  <service>  [banner]" for open ports
+
+  // Traceroute: one TTL-incrementing ping per loop tick (watchdog-safe).
+  IPAddress tracerouteTarget;
+  int tracerouteTtl = 1;
+  std::vector<std::string> tracerouteHops;
+
+  // SNMP Sweep: one community string per loop tick (watchdog-safe).
+  IPAddress snmpTarget;
+  int snmpCommunityIdx = 0;
+  std::vector<std::string> snmpHits;  // "<community>  sysDescr: ..." for accepted communities
+
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   BLEScan* bleScan = nullptr;
   bool bleReady = false;
@@ -272,12 +350,11 @@ class RadioAuditActivity final : public Activity {
   void startBleScan();
   void prepWifiSta();  // shutdown BLE + reset WiFi into clean STA mode
 #if defined(RADIO_AUDIT_ENABLE_BLE)
-  void absorbBleResults(BLEScanResults* results, int maxDevices);  // merge one scan window, capped
-  bool runBleScan(bool active, int windows);  // WiFi-off + heap-guarded bounded BLE windows -> bleFindings
   // Flood-safe scan for the Threat Sweep: passive scan + a per-advert callback
   // that merges each device then erases it from the BLE result map, so a BLE-spam
   // flood can't accumulate hundreds of parsed adverts and exhaust scan-time heap.
-  bool runBleScanStreaming(int windows);
+  bool runBleScanStreaming(int windows, bool active = false);  // bounded (erase-as-you-go) BLE scan
+
  public:
   // Sink for the streaming callback (one parsed advert). Public only so the
   // anonymous-namespace callback object in the .cpp can reach it.
@@ -307,26 +384,61 @@ class RadioAuditActivity final : public Activity {
 #if defined(RADIO_AUDIT_ENABLE_ACTIVE)
   void startCameraDeauth();  // directed deauth of the selected camera off its AP
 #endif
-  void showAbout();  // credits + version page
-  void startTrackerSweep();  // active BLE scan, then list AirTag/Tile/SmartTag trackers
-  void startAntiStalk();     // repeated BLE passes; flag devices that follow across passes
-  void antiStalkPass();      // one BLE pass: update the persistence table
-  void stopAntiStalk();      // end the watch, show a summary of followers
-  void renderAntiStalk();    // live persistence view
+  void showAbout();                                  // credits + version page
+  void startTrackerSweep();                          // active BLE scan, then list AirTag/Tile/SmartTag trackers
+  void startAntiStalk();                             // repeated BLE passes; flag devices that follow across passes
+  void antiStalkPass();                              // one BLE pass: update the persistence table
+  void stopAntiStalk();                              // end the watch, show a summary of followers
+  void renderAntiStalk();                            // live persistence view
   bool isWatchlisted(const std::string& mac) const;  // MAC/prefix match against watchlist.txt
-  void startGuardian();      // set-and-forget monitor: unifies the passive detectors
-  void guardianPass();       // one round: BLE threats + followers, then a deauth-flood window
+  void startGuardian();                              // set-and-forget monitor: unifies the passive detectors
+  void guardianPass();                               // one round: BLE threats + followers, then a deauth-flood window
   void stopGuardian();
-  void renderGuardian();     // live threat dashboard (ALL CLEAR / active threats)
-  void showLogSetup();       // interval picker shown before logging starts
+  void renderGuardian();  // live threat dashboard (ALL CLEAR / active threats)
+  void showLogSetup();    // interval picker shown before logging starts
   void renderLogSetup();
   void startScheduledLog();  // unattended: scan WiFi+BLE on an interval, append to SD with timestamps
   void scanLogPass();        // one logging cycle
   void stopScheduledLog();
   void renderScheduledLog();
-  void startThreatSweep();   // WiFi+BLE scan, then list Flipper/Pwnagotchi/skimmer/Meshtastic/relay/Axon hits
+  void startMdnsBrowse();        // associate to a network (if needed), then enumerate mDNS services
+  void runMdnsQueryPass();       // query one service type, append responders (one per loop tick)
+  void finishMdnsQuery();        // stop the responder, show results, return WiFi to a clean state
+  void startLanScan();           // associate (if needed), then ARP-sweep the local /24
+  void lanScanPass();            // one tick: ARP-request a batch + harvest the ARP table
+  void finishLanScan();          // show the host list, return WiFi to a clean state
+  void showWpsAudit();           // filtered view of scanned APs advertising WPS
+  void showSystemStats();        // device diagnostics (heap / CPU / temp / uptime)
+  void showI2cScan();            // probe the I2C bus; label known chips + flag NFC candidates
+  void startNtpSync();           // associate (if needed), then set the RTC from NTP
+  void doNtpSync();              // run the (blocking) NTP sync + show the result
+  void startNetInfo();           // associate (if needed), then show network details + ping
+  void doNetInfo();              // gather IP/gateway/DNS + ping gateway & internet
+  void startPortProbe();         // prompt for a target IP (+ associate), then TCP port-scan it
+  void beginPortProbe();         // reset state + enter PORT_PROBE once connected
+  void portProbePass();          // one tick: connect to the next port, grab banner if HTTP
+  void finishPortProbe();        // show the open-port list, return WiFi to a clean state
+  void showSubnetCalc();         // prompt for IP/CIDR, show network/broadcast/host range (no radio needed)
+  void startTraceroute();        // prompt for a target IP (+ associate), then TTL-incrementing ping trace
+  void beginTraceroute();        // reset state + enter TRACEROUTE once connected
+  void traceroutePass();         // one tick: ping the next TTL
+  void finishTraceroute();       // show the hop list, return WiFi to a clean state
+  void startDhcpProbe();         // associate (if needed), then probe for rogue DHCP servers
+  void doDhcpProbe();            // broadcast a DHCPDISCOVER, collect distinct offering servers
+  void startSnmpSweep();         // prompt for a target IP (+ associate), then try default SNMP communities
+  void beginSnmpSweep();         // reset state + enter SNMP_SWEEP once connected
+  void snmpSweepPass();          // one tick: try the next community string
+  void finishSnmpSweep();        // show accepted communities, return WiFi to a clean state
+  void renderMdnsList();         // selectable list of discovered mDNS services
+  void openMdnsDetail(int idx);  // detail view: host/IP/port + advertised TXT records
+  void startThreatSweep();       // WiFi+BLE scan, then list Flipper/Pwnagotchi/skimmer/Meshtastic/relay/Axon hits
 #if defined(RADIO_AUDIT_ENABLE_BLE)
   void gattEnumerate();  // connect to the detail-view BLE device and dump services
+#endif
+#if defined(RADIO_AUDIT_ENABLE_ACTIVE) && defined(RADIO_AUDIT_ENABLE_BLE)
+  // Anti-stalk: connect to the selected (separated) Apple Find My / AirTag tracker
+  // and write the play-sound opcode so a tag planted on you can be found by ear.
+  void playFindMySound(bool stop = false);  // make a separated tracker chirp (or stop it)
 #endif
   void deepScanWifiTarget(int index);
   void deepScanBleTarget(int index);
@@ -338,14 +450,14 @@ class RadioAuditActivity final : public Activity {
   void stopHandshakeCapture();
   void processHandshakes();
   void renderHandshake();
-  void startDeauthDetect();    // passive deauth/disassoc flood monitor
+  void startDeauthDetect();  // passive deauth/disassoc flood monitor
   void stopDeauthDetect();
   void processDeauthDetect();  // write alert lines for sources over threshold
   void renderDeauthDetect();
-  void startDroneScan();       // passive OpenDroneID (Remote ID) beacon monitor
+  void startDroneScan();  // passive OpenDroneID (Remote ID) beacon monitor
   void stopDroneScan();
   void renderDroneScan();
-  void openTargetMenu();              // build + show the deep-scan action menu
+  void openTargetMenu();  // build + show the deep-scan action menu
   std::string targetMenuLabel(int code) const;
   void runTargetMenuItem(int code);
   void renderTargetMenu();
@@ -354,13 +466,13 @@ class RadioAuditActivity final : public Activity {
   bool requireAuthorization();  // returns true if already authorized; else prompts and returns false
   void handshakeDeauthTarget();
   void beginDeauth(std::vector<int> targets, const std::string& label);  // focused/grouped/all deauth
-  void startDeauthAttack();    // all visible APs
-  void startDeauthSelected();  // only APs marked in the WiFi results list
-  void startDeauthCameras();   // only APs fingerprinted as cameras (Flock etc.)
+  void startDeauthAttack();                                              // all visible APs
+  void startDeauthSelected();                                            // only APs marked in the WiFi results list
+  void startDeauthCameras();  // only APs fingerprinted as cameras (Flock etc.)
   void startBeaconFlood();
-  void startEvilTwin();        // rogue AP + captive portal (launches EvilTwinActivity)
-  void startBleSpoof();        // flood the air with phantom BLE advertisements
-  void startKarma();           // harvest probe-request PNLs + beacon them back
+  void startEvilTwin();  // rogue AP + captive portal (launches EvilTwinActivity)
+  void startBleSpoof();  // flood the air with phantom BLE advertisements
+  void startKarma();     // harvest probe-request PNLs + beacon them back
   void stopAttack();
   void renderAttack();
 #endif
@@ -400,6 +512,7 @@ class RadioAuditActivity final : public Activity {
   bool preventAutoSleep() override {
     return state == State::WIFI_SCANNING || state == State::BLE_SCANNING || state == State::CAPTURING ||
            state == State::ATTACKING || state == State::STALKING || state == State::GUARDIAN ||
-           state == State::LOGGING || locating;
+           state == State::LOGGING || state == State::MDNS_QUERY || state == State::LAN_SCAN ||
+           state == State::PORT_PROBE || state == State::TRACEROUTE || state == State::SNMP_SWEEP || locating;
   }
 };

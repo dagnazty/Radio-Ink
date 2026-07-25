@@ -4,8 +4,11 @@
 #include <I18n.h>
 
 #include <algorithm>
+#include <memory>
 
 #include "MappedInputManager.h"
+#include "activities/ActivityResult.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -352,7 +355,21 @@ void KeyboardEntryActivity::loop() {
   }
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    onCancel();
+    // Optional guard so a stray Back doesn't discard typed text mid-sentence.
+    // Only prompts when something actually changed since the screen opened.
+    if (confirmDiscard && text != originalText) {
+      startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Discard changes?",
+                                                                    "Unsaved text will be lost."),
+                             [this](const ActivityResult& result) {
+                               if (!result.isCancelled) {
+                                 onCancel();  // Right = discard & exit
+                               } else {
+                                 requestUpdate();  // Left = keep editing
+                               }
+                             });
+    } else {
+      onCancel();
+    }
   }
 
   if (hintVisible && !cursorMode && millis() - hintShowTime > 4000) {
@@ -735,6 +752,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+  UITheme::getInstance().suppressBrandLogoOnce();  // keyboard fills the screen: no brand logo over the keys
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   GUI.drawSideButtonHints(renderer, ">", "<");

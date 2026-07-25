@@ -17,10 +17,20 @@
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
-#include "util/FullScreenMessageActivity.h"
 #include "util/AboutActivity.h"
+#include "util/AuthenticatorActivity.h"
+#include "util/BadgeActivity.h"
+#include "util/CalendarActivity.h"
+#include "util/ClockActivity.h"
+#include "util/EncodeDecodeActivity.h"
+#include "util/FullScreenMessageActivity.h"
+#include "util/HashCalcActivity.h"
 #include "util/MoviePlayerActivity.h"
+#include "util/NotepadActivity.h"
+#include "util/PasswordGenActivity.h"
+#include "util/QrGenActivity.h"
 #include "util/RadioAuditActivity.h"
+#include "util/ToolsActivity.h"
 
 void ActivityManager::begin() {
   xTaskCreate(&renderTaskTrampoline, "ActivityManagerRender",
@@ -198,20 +208,121 @@ void ActivityManager::goToBrowser() {
   }
 }
 
-void ActivityManager::goToRadioAudit() {
-  replaceActivity(std::make_unique<RadioAuditActivity>(renderer, mappedInput));
+void ActivityManager::goToRadioAudit() { replaceActivity(std::make_unique<RadioAuditActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToMovies() { replaceActivity(std::make_unique<MoviePlayerActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToNotepad() { replaceActivity(std::make_unique<NotepadActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToBadge() { replaceActivity(std::make_unique<BadgeActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToAuthenticator() {
+  replaceActivity(std::make_unique<AuthenticatorActivity>(renderer, mappedInput));
 }
 
-void ActivityManager::goToMovies() {
-  replaceActivity(std::make_unique<MoviePlayerActivity>(renderer, mappedInput));
+void ActivityManager::goToClock() { replaceActivity(std::make_unique<ClockActivity>(renderer, mappedInput)); }
+void ActivityManager::goToCalendar() { replaceActivity(std::make_unique<CalendarActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToPasswordGen() {
+  replaceActivity(std::make_unique<PasswordGenActivity>(renderer, mappedInput));
 }
 
-void ActivityManager::goToAbout() {
-  replaceActivity(std::make_unique<AboutActivity>(renderer, mappedInput));
+void ActivityManager::goToHashCalc() { replaceActivity(std::make_unique<HashCalcActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToEncodeDecode() {
+  replaceActivity(std::make_unique<EncodeDecodeActivity>(renderer, mappedInput));
 }
+
+void ActivityManager::goToQrGen() { replaceActivity(std::make_unique<QrGenActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToTools(ToolItem initial) {
+  replaceActivity(std::make_unique<ToolsActivity>(renderer, mappedInput, initial));
+}
+
+void ActivityManager::goToAbout() { replaceActivity(std::make_unique<AboutActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToReader(std::string path) {
   replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path)));
+}
+
+ResumeTarget ActivityManager::currentResumeTarget() const {
+  if (!currentActivity) return ResumeTarget::Home;
+  const std::string& n = currentActivity->name;
+  // Whitelist of screens that are safe to re-enter fresh on wake. Anything else
+  // (network/AP servers, keyboard/sub-activities, the reader) resolves to Home.
+  if (n == "Tools") return ResumeTarget::Tools;
+  if (n == "Notepad") return ResumeTarget::Notepad;
+  if (n == "Badge") return ResumeTarget::Badge;
+  if (n == "Authenticator") return ResumeTarget::Authenticator;
+  if (n == "Clock") return ResumeTarget::Clock;
+  if (n == "Calendar") return ResumeTarget::Calendar;
+  if (n == "PasswordGen") return ResumeTarget::PasswordGen;
+  if (n == "HashCalc") return ResumeTarget::HashCalc;
+  if (n == "EncodeDecode") return ResumeTarget::EncodeDecode;
+  if (n == "QrGen") return ResumeTarget::QrGen;
+  if (n == "RadioInk" || n == "RadioAudit") return ResumeTarget::RadioAudit;
+  if (n == "FileBrowser") return ResumeTarget::FileBrowser;
+  if (n == "RecentBooks") return ResumeTarget::RecentBooks;
+  if (n == "Settings") return ResumeTarget::Settings;
+  if (n == "About") return ResumeTarget::About;
+  if (n == "Movies") return ResumeTarget::Movies;
+  return ResumeTarget::Home;
+}
+
+bool ActivityManager::resumeActivity(ResumeTarget target) {
+  switch (target) {
+    case ResumeTarget::Tools:
+      goToTools();
+      return true;
+    case ResumeTarget::Notepad:
+      goToNotepad();
+      return true;
+    case ResumeTarget::Badge:
+      goToBadge();
+      return true;
+    case ResumeTarget::Authenticator:
+      goToAuthenticator();
+      return true;
+    case ResumeTarget::Clock:
+      goToClock();
+      return true;
+    case ResumeTarget::Calendar:
+      goToCalendar();
+      return true;
+    case ResumeTarget::PasswordGen:
+      goToPasswordGen();
+      return true;
+    case ResumeTarget::HashCalc:
+      goToHashCalc();
+      return true;
+    case ResumeTarget::EncodeDecode:
+      goToEncodeDecode();
+      return true;
+    case ResumeTarget::QrGen:
+      goToQrGen();
+      return true;
+    case ResumeTarget::RadioAudit:
+      goToRadioAudit();
+      return true;
+    case ResumeTarget::FileBrowser:
+      goToFileBrowser();
+      return true;
+    case ResumeTarget::RecentBooks:
+      goToRecentBooks();
+      return true;
+    case ResumeTarget::Settings:
+      goToSettings();
+      return true;
+    case ResumeTarget::About:
+      goToAbout();
+      return true;
+    case ResumeTarget::Movies:
+      goToMovies();
+      return true;
+    case ResumeTarget::Home:
+      return false;
+  }
+  return false;
 }
 
 void ActivityManager::goToSleep(bool fromTimeout) {
@@ -238,6 +349,8 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "RadioInk" || activityName == "RadioAudit") {
       initialMenuItem = HomeMenuItem::RADIO_AUDIT;
+    } else if (activityName == "Tools") {
+      initialMenuItem = HomeMenuItem::TOOLS;
     } else if (activityName == "Settings") {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
     }

@@ -12,17 +12,17 @@
 #include <cstring>
 #include <vector>
 
-#include "RadioInkSettings.h"
-#include "RadioInkState.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "RadioInkSettings.h"
+#include "RadioInkState.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
-#include "images/RadioInkSkull.h"  // RADIOINK_SKULL_WIDTH: reserve the logo's corner in the menu
 #include "fontIds.h"
+#include "images/RadioInkSkull.h"  // RADIOINK_SKULL_WIDTH: reserve the logo's corner in the menu
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 7;  // File Browser, Recents, File transfer, Radio Ink, Movies, Settings, About
+  int count = 8;  // File Browser, Recents, File transfer, Radio Ink, Movies, Tools, Settings, About
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -204,6 +204,9 @@ void HomeActivity::loop() {
         case HomeMenuItem::MOVIES:
           onMoviesOpen();
           break;
+        case HomeMenuItem::TOOLS:
+          onToolsOpen();
+          break;
         case HomeMenuItem::SETTINGS_MENU:
           onSettingsOpen();
           break;
@@ -246,9 +249,15 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                        "Radio Ink", "Movies", tr(STR_SETTINGS_TITLE), "About"};
-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Wifi, Image, Settings, Text};
+  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES),
+                                        tr(STR_MENU_RECENT_BOOKS),
+                                        tr(STR_FILE_TRANSFER),
+                                        "Radio Ink",
+                                        "Movies",
+                                        "Tools",
+                                        tr(STR_SETTINGS_TITLE),
+                                        "About"};
+  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Wifi, Film, Library, Settings, Info};
 
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
@@ -300,6 +309,8 @@ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 void HomeActivity::onRadioAuditOpen() { activityManager.goToRadioAudit(); }
 
 void HomeActivity::onMoviesOpen() { activityManager.goToMovies(); }
+
+void HomeActivity::onToolsOpen() { activityManager.goToTools(); }
 
 void HomeActivity::onAboutOpen() { activityManager.goToAbout(); }
 

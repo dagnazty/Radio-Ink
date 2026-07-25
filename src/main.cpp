@@ -18,11 +18,11 @@
 
 #include <cstring>
 
-#include "RadioInkSettings.h"
-#include "RadioInkState.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "RadioInkSettings.h"
+#include "RadioInkState.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
@@ -237,6 +237,9 @@ static bool loadSleepFrameBuffer() {
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
+  // Record which screen to restore on wake (Home == no resume). Captured here while
+  // the real activity is still current, before goToSleep() swaps in SleepActivity.
+  APP_STATE.resumeActivity = static_cast<uint8_t>(activityManager.currentResumeTarget());
 
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == RadioInkSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -302,6 +305,35 @@ void setupDisplayAndFonts(bool seamless = false) {
   LOG_DBG("MAIN", "Fonts setup");
 }
 
+namespace {
+constexpr const char* SD_LOG_PATH = "/radioink.log";
+constexpr const char* SD_LOG_OLD_PATH = "/radioink.log.old";
+constexpr size_t SD_LOG_MAX_BYTES = 512 * 1024;  // rotate once the log passes 512 KB
+
+// Sink for drainSdLogs(): append one already-formatted, '\n'-terminated line.
+// Runs from the main loop (never a log call), so touching the SD card is safe.
+void sdLogSink(const char* line) {
+  if (!Storage.ready()) return;
+  auto f = Storage.open(SD_LOG_PATH, O_WRITE | O_CREAT | O_APPEND);
+  if (f) {
+    f.print(line);
+    f.close();
+  }
+}
+
+// One-generation rotation so the log can't grow without bound: past the cap, the
+// current log becomes radioink.log.old (replacing any previous one).
+void rotateSdLogIfLarge() {
+  if (!Storage.ready() || !Storage.exists(SD_LOG_PATH)) return;
+  auto f = Storage.open(SD_LOG_PATH, O_RDONLY);
+  const size_t sz = f ? f.fileSize() : 0;
+  if (f) f.close();
+  if (sz <= SD_LOG_MAX_BYTES) return;
+  Storage.remove(SD_LOG_OLD_PATH);
+  Storage.rename(SD_LOG_PATH, SD_LOG_OLD_PATH);
+}
+}  // namespace
+
 void setup() {
   t1 = millis();
 
@@ -355,6 +387,10 @@ void setup() {
   }
 
   SETTINGS.loadFromFile();
+
+  // Persistent SD logging: apply the saved verbosity and rotate an oversized log.
+  setSdLogLevel(SETTINGS.sdLogLevel);
+  rotateSdLogIfLarge();
 
   // One-time migration: the clock/battery Status Bar settings now drive the device-wide
   // header too. Devices upgrading from when the clock was reader-only (and defaulted off)
@@ -476,18 +512,26 @@ void setup() {
     // through to the sleep-wake "resume reader" logic, which fires on stale
     // openEpubPath + lastSleepFromReader from a prior session.
     activityManager.goHome();
-  } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
-             mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
-    // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
-    // crashed (indicated by readerActivityLoadCount > 0)
+  } else if (mappedInputManager.isPressed(MappedInputManager::Button::Back)) {
+    // Holding Back during boot always escapes to the home screen — the recovery
+    // hatch if a resumed activity ever misbehaves.
     activityManager.goHome();
-  } else {
-    // Clear app state to avoid getting into a boot loop if the epub doesn't load
+  } else if (!APP_STATE.openEpubPath.empty() && APP_STATE.lastSleepFromReader &&
+             APP_STATE.readerActivityLoadCount == 0) {
+    // Resume the reader at the last book/page. Clear app state first to avoid a boot
+    // loop if the epub doesn't load (readerActivityLoadCount guards the retry).
     const auto path = APP_STATE.openEpubPath;
     APP_STATE.openEpubPath = "";
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();
     activityManager.goToReader(path);
+  } else if (gpio.wokeFromDeepSleep() &&
+             activityManager.resumeActivity(static_cast<ResumeTarget>(APP_STATE.resumeActivity))) {
+    // Resumed a whitelisted non-reader screen (tools/menus/Radio Audit) at its top.
+    // Only on a genuine sleep→wake — a cold power-on or software restart falls to home.
+  } else {
+    // No resume target (Home) or an unknown value: land on the home screen.
+    activityManager.goHome();
   }
 
   if (resume == BootResume::Silent) {
@@ -528,6 +572,15 @@ void loop() {
     lastMemPrint = millis();
   }
 
+  // Flush staged log lines to the SD card. Throttled so a high verbosity setting
+  // can't hammer the card or stall the loop; picks up live setting changes too.
+  static unsigned long lastLogFlush = 0;
+  if (millis() - lastLogFlush >= 500) {
+    lastLogFlush = millis();
+    setSdLogLevel(SETTINGS.sdLogLevel);
+    drainSdLogs(sdLogSink);
+  }
+
   // Handle incoming serial commands,
   // nb: we use logSerial from logging to avoid deprecation warnings
   if (logSerial.available() > 0) {
@@ -553,19 +606,36 @@ void loop() {
         key.trim();
         key.toUpperCase();
         int button = -1;
-        if (key == "UP") button = HalGPIO::BTN_UP;
-        else if (key == "DOWN") button = HalGPIO::BTN_DOWN;
-        else if (key == "SELECT" || key == "CONFIRM") button = HalGPIO::BTN_CONFIRM;
-        else if (key == "BACK") button = HalGPIO::BTN_BACK;
-        else if (key == "LEFT") button = HalGPIO::BTN_LEFT;
-        else if (key == "RIGHT") button = HalGPIO::BTN_RIGHT;
-        else if (key == "POWER") button = HalGPIO::BTN_POWER;
+        if (key == "UP")
+          button = HalGPIO::BTN_UP;
+        else if (key == "DOWN")
+          button = HalGPIO::BTN_DOWN;
+        else if (key == "SELECT" || key == "CONFIRM")
+          button = HalGPIO::BTN_CONFIRM;
+        else if (key == "BACK")
+          button = HalGPIO::BTN_BACK;
+        else if (key == "LEFT")
+          button = HalGPIO::BTN_LEFT;
+        else if (key == "RIGHT")
+          button = HalGPIO::BTN_RIGHT;
+        else if (key == "POWER")
+          button = HalGPIO::BTN_POWER;
         if (button >= 0) {
           gpio.injectTap(static_cast<uint8_t>(button));
           logSerial.printf("KEY_OK:%s\n", key.c_str());
         } else {
           logSerial.println("KEY_FAIL");
         }
+      } else if (cmd.startsWith("CAT:")) {
+        // Stream an SD file over serial, wrapped in CAT_START/CAT_END markers so a
+        // host can extract it (e.g. /radioink.log, /crash_report.txt).
+        String path = cmd.substring(4);
+        path.trim();
+        logSerial.printf("CAT_START:%s\n", path.c_str());
+        if (!Storage.readFileToStream(path.c_str(), logSerial)) {
+          logSerial.print("CAT_ERR: not found or unreadable");
+        }
+        logSerial.print("\nCAT_END\n");
       }
     }
   }
