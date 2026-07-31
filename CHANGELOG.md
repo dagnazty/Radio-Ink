@@ -4,6 +4,45 @@ All notable changes to **Radio Ink** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions track `[radioink] version`
 in `platformio.ini` and the GitHub release tags.
 
+## [1.3.1] — 2026-07-31
+
+### Added
+- **Read Later** (Home → Tools) — enter a URL and the page is fetched over Wi-Fi, reduced to plain text, and
+  saved to `/articles` on SD, where it opens in the normal reader. The HTML-to-text reduction is streaming
+  (a byte-at-a-time state machine over the response, written straight out), so a long article costs the same
+  RAM as a short one; `<script>`/`<style>`/`<nav>`/`<footer>` are dropped, block tags become line breaks, and
+  the common HTML entities are decoded. Files are named from the page title, de-duplicated on collision. The
+  radio is brought up for the one fetch and shut down again immediately — no background Wi-Fi.
+- **News / RSS** (Home → Tools) — a feed reader over the same pipeline. Subscriptions live in a readable
+  `/feeds.txt` (`url` or `Name|url` per line) and can be added or removed on device. Feeds are fetched only
+  when opened, never polled; RSS 2.0 and Atom are both parsed by a small streaming scanner that pulls item
+  titles and links (including Atom's `href` attribute, preferring `rel="alternate"`) with a 24-item cap.
+  Opening a headline fetches the article into `/articles` and hands off to the reader.
+- **Flashcards** (Home → Tools) — spaced repetition reading tab-separated decks from `/flashcards/<name>.tsv`,
+  with SM-2 scheduling persisted to a plain-text `<name>.sched` sidecar. Confirm flips a card; Left / Confirm /
+  Right grade it Again / Good / Easy. Card *text* is never held in RAM — the deck is indexed once into byte
+  offsets plus 12 bytes of state per card (a 512-card deck costs ~6 KB regardless of card length) and each
+  card is read from SD as it is shown. The schedule is written once on exit rather than per card, to spare the
+  SD sectors. Without a valid RTC, scheduling is skipped and the deck is walked end to end.
+- **Calculator** (Home → Tools) — a 5x4 on-screen keypad (digits, `+ - * /`, parentheses, decimal point,
+  clear, backspace, and `=`) moved around with the D-pad and pressed with Confirm, under a boxed
+  right-aligned readout showing the expression and its result. Keys are drawn with the same
+  `drawKeyboardKey` styling as the on-screen keyboard, so the pad matches the rest of the UI; `=` and
+  backspace are marked as special keys the way Ok/Del are there. Expressions are evaluated on `=` by a
+  recursive-descent parser with correct precedence and associativity (`-` and `/` left-associative), and
+  division by zero or an unbalanced expression shows `Error` rather than a wrong answer. Typing a digit
+  after a result starts a fresh sum; pressing an operator continues from it, like a desk calculator.
+- **Four new menu icons** — calculator, cards, article, and RSS glyphs, so the growing Tools menu keeps one
+  distinct icon per row.
+
+### Changed
+- **`SCOPE.md` rewritten to describe Radio Ink rather than CrossPoint Reader.** The old document still called
+  the project CrossPoint and listed "No Notepads, Calculators, or Games" and "No RSS readers, News
+  aggregators, or Web browsers" as out-of-scope — which the firmware had long since passed. It now describes
+  what the device actually is (a reader plus a field toolkit), states the bar a new tool has to clear, and
+  draws the line where it actually sits: pull-based, user-initiated fetches that end in text on the SD card
+  are in scope; background connectivity and live web browsing are not.
+
 ## [1.3.0] — 2026-06-27
 
 ### Added

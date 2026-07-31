@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#
+# Build and flash Radio Ink to a connected X3/X4 over USB.
+#
+#   bin/flash                 build + upload the dev firmware (env: default)
+#   bin/flash -m              ... then open the serial monitor
+#   bin/flash -e gh_release   flash the release build (no active attacks)
+#   bin/flash -b              build only, don't touch the device
+#   bin/flash --erase         wipe flash first (settings, SPIFFS, cached state)
+#   bin/flash -p /dev/cu.usbmodem2101   force a port
+#   bin/flash -l              list candidate ports and exit
+#
+# The `default` env carries -DRADIO_AUDIT_ENABLE_ACTIVE=1 (deauth, beacon flood,
+# evil twin). `gh_release` deliberately does not — flash that to check what users
+# actually get.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+ENVIRONMENT="default"
+PORT=""
+MONITOR=0
+BUILD_ONLY=0
+ERASE=0
+
+usage() {
+  cat <<'EOF'
+Build and flash Radio Ink to a connected X3/X4 over USB.
+
+  bin/flash                 build + upload the dev firmware (env: default)
+  bin/flash -m              ... then open the serial monitor
+  bin/flash -e gh_release   flash the release build (no active attacks)
+  bin/flash -b              build only, don't touch the device
+  bin/flash --erase         wipe flash first (settings, SPIFFS, cached state)
+  bin/flash -p PORT         force a port
+  bin/flash -l              list candidate ports and exit
+
+The `default` env carries -DRADIO_AUDIT_ENABLE_ACTIVE=1 (deauth, beacon flood,
+evil twin). `gh_release` deliberately does not.
+EOF
+  exit "${1:-0}"
+}
+
+list_ports() {
+  local found=()
+  case "$(uname -s)" in
+    Darwin) found=(/dev/cu.usbmodem*) ;;
+    *) found=(/dev/ttyUSB* /dev/ttyACM*) ;;
+  esac
+  for p in "${found[@]}"; do
+    [[ -e "$p" ]] && printf '%s\n' "$p"
+  done
+}
+
+# Pick the sole connected device; refuse to guess when several are plugged in.
+# Built with a read loop rather than mapfile: macOS still ships bash 3.2.
+detect_port() {
+  local ports=()
+  local line
+  while IFS= read -r line; do
+    ports+=("$line")
+  done < <(list_ports)
+
+  if [[ ${#ports[@]} -eq 0 ]]; then
+    echo "No device found. Plug the X3 in over USB, or pass -p <port>." >&2
+    echo "Candidates checked: /dev/cu.usbmodem* (macOS), /dev/ttyUSB*, /dev/ttyACM*" >&2
+    exit 1
+  fi
+
+  if [[ ${#ports[@]} -gt 1 ]]; then
+    echo "Several serial devices are connected; pick one with -p:" >&2
+    printf '  %s\n' "${ports[@]}" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${ports[0]}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -e|--env) ENVIRONMENT="${2:?-e needs an environment name}"; shift 2 ;;
+    -p|--port) PORT="${2:?-p needs a port}"; shift 2 ;;
+    -m|--monitor) MONITOR=1; shift ;;
+    -b|--build-only) BUILD_ONLY=1; shift ;;
+    -l|--list-ports) list_ports; exit 0 ;;
+    --erase) ERASE=1; shift ;;
+    -h|--help) usage 0 ;;
+    *) echo "Unknown option: $1" >&2; usage 1 ;;
+  esac
+done
+
+# Prefer the project venv so the pio version matches what the build scripts expect.
+if [[ -x .venv/bin/pio ]]; then
+  PIO=".venv/bin/pio"
+elif command -v pio >/dev/null 2>&1; then
+  PIO="pio"
+else
+  echo "PlatformIO not found. Expected .venv/bin/pio or 'pio' on PATH." >&2
+  echo "Install it with: python3 -m venv .venv && .venv/bin/pip install platformio" >&2
+  exit 1
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  echo "==> Building $ENVIRONMENT"
+  exec "$PIO" run -e "$ENVIRONMENT"
+fi
+
+[[ -z "$PORT" ]] && PORT="$(detect_port)"
+
+if [[ ! -e "$PORT" ]]; then
+  echo "Port $PORT does not exist." >&2
+  exit 1
+fi
+
+if [[ $ERASE -eq 1 ]]; then
+  echo "Erasing flash wipes settings, reading progress, and anything in SPIFFS."
+  echo "Files on the SD card are not touched."
+  read -r -p "Erase $PORT? [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+  echo "==> Erasing $PORT"
+  "$PIO" run -e "$ENVIRONMENT" -t erase --upload-port "$PORT"
+fi
+
+echo "==> Building and uploading $ENVIRONMENT to $PORT"
+"$PIO" run -e "$ENVIRONMENT" -t upload --upload-port "$PORT"
+
+if [[ $MONITOR -eq 1 ]]; then
+  echo "==> Monitoring $PORT (Ctrl-C to stop)"
+  if [[ -x .venv/bin/python && -f scripts/debugging_monitor.py ]]; then
+    exec .venv/bin/python scripts/debugging_monitor.py "$PORT"
+  else
+    exec "$PIO" device monitor -p "$PORT" -b 115200
+  fi
+fi

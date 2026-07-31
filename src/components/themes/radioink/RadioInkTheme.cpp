@@ -7,9 +7,12 @@
 
 #include "RadioInkSettings.h"
 #include "components/UITheme.h"
+#include "components/icons/article.h"
 #include "components/icons/book.h"
 #include "components/icons/bookmark.h"
+#include "components/icons/calculator.h"
 #include "components/icons/calendar.h"
+#include "components/icons/cards.h"
 #include "components/icons/clock.h"
 #include "components/icons/film.h"
 #include "components/icons/folder.h"
@@ -22,6 +25,7 @@
 #include "components/icons/note.h"
 #include "components/icons/qrcode.h"
 #include "components/icons/recent.h"
+#include "components/icons/rss.h"
 #include "components/icons/settings2.h"
 #include "components/icons/transfer.h"
 #include "components/icons/wifi.h"
@@ -69,6 +73,14 @@ const uint8_t* radioInkIcon32(UIIcon icon) {
       return FilmIcon;
     case UIIcon::Calendar:
       return CalendarIcon;
+    case UIIcon::Calculator:
+      return CalculatorIcon;
+    case UIIcon::Cards:
+      return CardsIcon;
+    case UIIcon::Article:
+      return ArticleIcon;
+    case UIIcon::Rss:
+      return RssIcon;
     case UIIcon::Info:
       return InfoIcon;
     default:

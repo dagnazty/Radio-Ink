@@ -19,6 +19,10 @@ constexpr ToolDef TOOLS[] = {
     {StrId::STR_AUTHENTICATOR, UIIcon::Lock, ToolItem::AUTHENTICATOR},
     {StrId::STR_CLOCK, UIIcon::Clock, ToolItem::CLOCK},
     {StrId::STR_CALENDAR, UIIcon::Calendar, ToolItem::CALENDAR},
+    {StrId::STR_READ_LATER, UIIcon::Article, ToolItem::READ_LATER},
+    {StrId::STR_NEWS, UIIcon::Rss, ToolItem::NEWS},
+    {StrId::STR_FLASHCARDS, UIIcon::Cards, ToolItem::FLASHCARDS},
+    {StrId::STR_CALCULATOR, UIIcon::Calculator, ToolItem::CALCULATOR},
     {StrId::STR_PASSWORD_GEN, UIIcon::Key, ToolItem::PASSWORD_GEN},
     {StrId::STR_HASH_CALC, UIIcon::Hash, ToolItem::HASH_CALC},
     {StrId::STR_ENCODE_DECODE, UIIcon::Transfer, ToolItem::ENCODE_DECODE},
@@ -57,6 +61,18 @@ void ToolsActivity::launch(int idx) {
       return;
     case ToolItem::CALENDAR:
       activityManager.goToCalendar();
+      return;
+    case ToolItem::READ_LATER:
+      activityManager.goToReadLater();
+      return;
+    case ToolItem::NEWS:
+      activityManager.goToNews();
+      return;
+    case ToolItem::FLASHCARDS:
+      activityManager.goToFlashcards();
+      return;
+    case ToolItem::CALCULATOR:
+      activityManager.goToCalculator();
       return;
     case ToolItem::PASSWORD_GEN:
       activityManager.goToPasswordGen();

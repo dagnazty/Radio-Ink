@@ -122,6 +122,10 @@ enum UIIcon {
   QrCode,
   Film,
   Calendar,
+  Calculator,
+  Cards,
+  Article,
+  Rss,
   Info
 };
 

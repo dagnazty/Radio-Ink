@@ -156,6 +156,26 @@ Full technical detail: **[RADIO_INK.md](./RADIO_INK.md)**. All audit data lives 
   and a scannable QR (URL or vCard/MECARD). Press Left for a full-screen QR; Confirm to edit. Config in a
   readable `/badge.txt`. (No NFC on the C3 — the QR is the tap.)
 
+- **Read Later** (Home → Tools): type a URL, and Radio Ink fetches the page over Wi-Fi, strips it to plain
+  text, and saves it to `/articles` on SD so it opens in the normal reader. One page per request — the radio
+  comes up, fetches, and goes back off. Left adds a URL, Confirm opens an article, Right deletes one.
+
+- **News / RSS** (Home → Tools): subscriptions live in a plain `/feeds.txt` (one per line, either
+  `https://example.com/feed` or `Name|https://example.com/feed`), or add them on device. Nothing polls in the
+  background — opening a feed fetches its headlines on demand, and opening a headline runs it through the same
+  HTML-to-text pipeline as Read Later, landing in `/articles` and opening in the reader. RSS 2.0 and Atom.
+
+- **Flashcards** (Home → Tools): spaced repetition off the SD card. Decks are tab-separated files at
+  `/flashcards/<name>.tsv` (`front<TAB>back`, one card per line); scheduling state is persisted beside each
+  deck as `<name>.sched`. Confirm flips the card, then Left / Confirm / Right grade it **Again / Good / Easy**
+  (SM-2 intervals). Card text is streamed from SD as each card is shown, so deck size costs no RAM. Needs the
+  RTC set for real scheduling — without it the deck is simply walked end to end.
+
+- **Calculator** (Home → Tools): a 5x4 keypad — digits, `+ - * /`, parentheses, decimal point, clear,
+  backspace, and `=` — moved around with the D-pad and pressed with Confirm, under a readout showing the
+  expression and its result. Correct precedence; division by zero or an unbalanced expression shows `Error`.
+  Typing a digit after a result starts fresh, pressing an operator continues from it.
+
 - **Password Generator** (Home → Tools): `esp_random()`-backed, adjustable length and character set
   (letters+digits, +symbols, or digits-only for a PIN), with an entropy estimate.
 

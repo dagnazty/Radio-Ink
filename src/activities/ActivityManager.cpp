@@ -20,16 +20,20 @@
 #include "util/AboutActivity.h"
 #include "util/AuthenticatorActivity.h"
 #include "util/BadgeActivity.h"
+#include "util/CalculatorActivity.h"
 #include "util/CalendarActivity.h"
 #include "util/ClockActivity.h"
 #include "util/EncodeDecodeActivity.h"
+#include "util/FlashcardsActivity.h"
 #include "util/FullScreenMessageActivity.h"
 #include "util/HashCalcActivity.h"
 #include "util/MoviePlayerActivity.h"
+#include "util/NewsActivity.h"
 #include "util/NotepadActivity.h"
 #include "util/PasswordGenActivity.h"
 #include "util/QrGenActivity.h"
 #include "util/RadioAuditActivity.h"
+#include "util/ReadLaterActivity.h"
 #include "util/ToolsActivity.h"
 
 void ActivityManager::begin() {
@@ -223,6 +227,14 @@ void ActivityManager::goToAuthenticator() {
 void ActivityManager::goToClock() { replaceActivity(std::make_unique<ClockActivity>(renderer, mappedInput)); }
 void ActivityManager::goToCalendar() { replaceActivity(std::make_unique<CalendarActivity>(renderer, mappedInput)); }
 
+void ActivityManager::goToCalculator() { replaceActivity(std::make_unique<CalculatorActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToFlashcards() { replaceActivity(std::make_unique<FlashcardsActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToReadLater() { replaceActivity(std::make_unique<ReadLaterActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToNews() { replaceActivity(std::make_unique<NewsActivity>(renderer, mappedInput)); }
+
 void ActivityManager::goToPasswordGen() {
   replaceActivity(std::make_unique<PasswordGenActivity>(renderer, mappedInput));
 }
@@ -288,6 +300,18 @@ bool ActivityManager::resumeActivity(ResumeTarget target) {
       return true;
     case ResumeTarget::Calendar:
       goToCalendar();
+      return true;
+    case ResumeTarget::Calculator:
+      goToCalculator();
+      return true;
+    case ResumeTarget::Flashcards:
+      goToFlashcards();
+      return true;
+    case ResumeTarget::ReadLater:
+      goToReadLater();
+      return true;
+    case ResumeTarget::News:
+      goToNews();
       return true;
     case ResumeTarget::PasswordGen:
       goToPasswordGen();

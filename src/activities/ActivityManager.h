@@ -47,7 +47,11 @@ enum class ToolItem {
   HASH_CALC,
   ENCODE_DECODE,
   QR_GEN,
-  CALENDAR
+  CALENDAR,
+  CALCULATOR,
+  FLASHCARDS,
+  READ_LATER,
+  NEWS
 };
 
 // Which screen to restore when waking from sleep. Persisted in RadioInkState as a
@@ -71,7 +75,11 @@ enum class ResumeTarget : uint8_t {
   Settings,
   About,
   Movies,
-  Calendar
+  Calendar,
+  Calculator,
+  Flashcards,
+  ReadLater,
+  News
 };
 
 /**
@@ -148,6 +156,10 @@ class ActivityManager {
   void goToAuthenticator();
   void goToClock();
   void goToCalendar();
+  void goToCalculator();
+  void goToFlashcards();
+  void goToReadLater();
+  void goToNews();
   void goToPasswordGen();
   void goToHashCalc();
   void goToEncodeDecode();
